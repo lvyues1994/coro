@@ -1,0 +1,99 @@
+# 普通测试：可执行文件名与源文件名一一对应，成功即退出码 0。
+set(co2_test_sources
+    conformance_tests.cpp
+    storage_tests.cpp
+    return_types_tests.cpp
+    scheduler_tests.cpp
+    thread_pool_tests.cpp
+    stop_token_tests.cpp
+    spawn_tests.cpp)
+
+# 契约违规测试：程序在预期的失败点经由契约处理器以退出码 86 结束。
+set(co2_contract_violation_test_sources
+    task_destroy_contract_violation_test.cpp
+    manual_executor_contract_violation_test.cpp
+    join_handle_contract_violation_test.cpp)
+
+function(co2_configure_test_target target)
+    target_link_libraries(${target} PRIVATE co2::co2)
+    set_target_properties(
+        ${target}
+        PROPERTIES
+            CXX_STANDARD 14
+            CXX_STANDARD_REQUIRED YES
+            CXX_EXTENSIONS NO)
+
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX)
+    else()
+        target_compile_options(
+            ${target}
+            PRIVATE
+                -Wall
+                -Wextra
+                -Wpedantic
+                -Werror
+                -Wconversion
+                -Wsign-conversion
+                -Wnon-virtual-dtor
+                -Wold-style-cast
+                -Wzero-as-null-pointer-constant
+                -Werror=return-type
+                -Werror=uninitialized
+                -Werror=suggest-override
+                -Werror=vla)
+    endif()
+endfunction()
+
+function(co2_test_target_name source out_var)
+    get_filename_component(stem "${source}" NAME_WE)
+    string(REPLACE "_" "-" stem "${stem}")
+    set(${out_var} "co2-${stem}" PARENT_SCOPE)
+endfunction()
+
+foreach(co2_test_source IN LISTS co2_test_sources)
+    co2_test_target_name("${co2_test_source}" co2_test_target)
+    add_executable(${co2_test_target} ${co2_test_source})
+    co2_configure_test_target(${co2_test_target})
+    add_test(NAME ${co2_test_target} COMMAND ${co2_test_target})
+endforeach()
+
+foreach(co2_test_source IN LISTS co2_contract_violation_test_sources)
+    co2_test_target_name("${co2_test_source}" co2_test_target)
+    add_executable(${co2_test_target} ${co2_test_source})
+    co2_configure_test_target(${co2_test_target})
+    add_test(NAME ${co2_test_target}
+             COMMAND ${CMAKE_COMMAND}
+                     -DTEST_EXECUTABLE=$<TARGET_FILE:${co2_test_target}>
+                     -DEXPECTED_EXIT_CODE=86
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/expect_exit_code.cmake)
+endforeach()
+
+# 每个公共头文件都必须能单独包含。
+file(GLOB_RECURSE co2_public_headers CONFIGURE_DEPENDS
+     "${PROJECT_SOURCE_DIR}/include/co2/*.hpp")
+set(co2_header_test_sources)
+foreach(co2_public_header IN LISTS co2_public_headers)
+    file(RELATIVE_PATH co2_header_include "${PROJECT_SOURCE_DIR}/include"
+         "${co2_public_header}")
+    string(MAKE_C_IDENTIFIER "${co2_header_include}" co2_header_identifier)
+    set(co2_header_test_source
+        "${CMAKE_CURRENT_BINARY_DIR}/header-self-containment/${co2_header_identifier}.cpp")
+    file(GENERATE OUTPUT "${co2_header_test_source}"
+         CONTENT "#include <${co2_header_include}>\n")
+    list(APPEND co2_header_test_sources "${co2_header_test_source}")
+endforeach()
+
+add_library(co2-header-self-containment-tests OBJECT ${co2_header_test_sources})
+co2_configure_test_target(co2-header-self-containment-tests)
+
+# 与原生 co_await 的差分测试只在编译器支持标准协程时构建。
+if("cxx_std_20" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+    foreach(co2_cpp20_source IN ITEMS differential_tests.cpp)
+        co2_test_target_name("${co2_cpp20_source}" co2_test_target)
+        add_executable(${co2_test_target} ${co2_cpp20_source})
+        co2_configure_test_target(${co2_test_target})
+        set_target_properties(${co2_test_target} PROPERTIES CXX_STANDARD 20)
+        add_test(NAME ${co2_test_target} COMMAND ${co2_test_target})
+    endforeach()
+endif()

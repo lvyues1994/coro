@@ -1,0 +1,6 @@
+set(PACKAGE_VERSION "@CO2_PACKAGE_VERSION@")
+
+# CMake 的 find_package 版本语法不能请求 "0.2.0-pre"。与其把预览包伪装成正式
+# 0.2.0，这里明确拒绝所有数字版本请求；不带版本的 CONFIG 查找仍可正常使用。
+set(PACKAGE_VERSION_EXACT FALSE)
+set(PACKAGE_VERSION_COMPATIBLE FALSE)
