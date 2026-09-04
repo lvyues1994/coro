@@ -3,6 +3,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -15,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "co2/callback.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/detail/result_storage.hpp"
 #include "co2/env.hpp"
@@ -333,6 +336,72 @@ void alreadyStoppedParentStartsChildrenStopped() {
     CHECK(saw);
 }
 
+// 模拟的可取消回调式 API：stop_callback 一触发就在请求线程上同步以"已取消"完成。
+struct CancellableApi {
+    void cancel() {
+        auto pending = std::move(handler);
+        handler = nullptr;
+        if (pending) pending(true);
+    }
+    std::function<void(bool)> handler;
+};
+
+struct Cancelled : std::runtime_error {
+    Cancelled() : std::runtime_error{"cancelled"} {}
+};
+
+auto cancelsSynchronously(CancellableApi& api)
+    CO2_BEG(co2::Task<int>, (api), int got{};) {
+    CO2_AWAIT_AS_SET(
+        got, co2::CallbackAwaitable<int>,
+        co2::fromCallback<int>([this](co2::Continuation<int> done,
+                                      co2::stop_token token) {
+            auto guard =
+                std::make_shared<co2::stop_callback<>>(token, [this] { api.cancel(); });
+            api.handler = [done, guard](bool const cancelled) mutable {
+                guard.reset();
+                if (cancelled)
+                    done.setException(std::make_exception_ptr(Cancelled{}));
+                else
+                    done(1);
+            };
+        }));
+    CO2_RETURN(got);
+}
+CO2_END
+
+auto awaitsCancellable(CancellableApi& first, CancellableApi& second)
+    CO2_BEG(co2::Task<int>, (first, second), std::tuple<int, int> results;) {
+    CO2_AWAIT_SET(results, co2::whenAll(cancelsSynchronously(first),
+                                        cancelsSynchronously(second)));
+    CO2_RETURN(std::get<0>(results) + std::get<1>(results));
+}
+CO2_END
+
+// 父的停止请求 → ForwardStop → whenAll 自己的 source.request_stop() → child 的
+// stop_callback 同步取消 → child 内联完成 → 最后一个 child 内联恢复等待者 → 等待者的
+// await 结束、WhenAllTuple（连同 source 与 children 的 token）被销毁——此时内部的
+// request_stop() 还在栈上。它必须自己保活停止状态（回归：曾是 use-after-free）。
+void parentStopMayTearDownTheWhenAllFromInsideItsForwardingCallback() {
+    CancellableApi first;
+    CancellableApi second;
+    co2::stop_source parent;
+    auto task = awaitsCancellable(first, second);
+    co2::detail::TaskAccess::start(task, co2::noop_coroutine(), parent.get_token());
+    CHECK(not co2::detail::TaskAccess::isDone(task));
+    CHECK(static_cast<bool>(first.handler) && static_cast<bool>(second.handler));
+
+    CHECK(parent.request_stop());
+    CHECK(co2::detail::TaskAccess::isDone(task));
+    bool thrown = false;
+    try {
+        co2::detail::TaskAccess::takeResult(task);
+    } catch (Cancelled const&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+}
+
 auto failsImmediately(int which) CO2_BEG(co2::Task<int>, (which)) {
     throw ExpectedError{which};
     CO2_RETURN(0);
@@ -449,6 +518,7 @@ int main() {
     firstFailureInTimeIsRethrownAfterEveryChildFinishes();
     parentStopRequestReachesEveryChild();
     alreadyStoppedParentStartsChildrenStopped();
+    parentStopMayTearDownTheWhenAllFromInsideItsForwardingCallback();
     synchronousFailureStillWaitsForSiblingsAndRethrows();
     vectorFailureRethrowsTheFirstInTime();
     nestedWhenAllOverManyChildrenOnAPool();

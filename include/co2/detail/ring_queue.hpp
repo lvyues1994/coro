@@ -14,8 +14,17 @@ namespace detail {
 // "尾进头出"的稳态下每隔一个块就分配/释放一次，做不到零分配；环在容量够用后再也不碰
 // 堆。非线程安全，调用方自己加锁。
 template <class T> struct RingQueue {
+    // pop() 是 noexcept 的：元素移动构造不得抛出。
     static_assert(std::is_nothrow_move_constructible<T>::value,
-                  "RingQueue<T> requires nothrow-movable elements");
+                  "RingQueue<T> requires nothrow-move-constructible elements: pop() is "
+                  "noexcept");
+    // grow() 用 std::vector<T>(capacity) 值初始化新缓冲区，再逐个移动赋值进去。
+    static_assert(std::is_default_constructible<T>::value,
+                  "RingQueue<T> requires default-constructible elements: grow() "
+                  "value-initializes the new buffer");
+    static_assert(std::is_nothrow_move_assignable<T>::value,
+                  "RingQueue<T> requires nothrow-move-assignable elements: push() and "
+                  "grow() move-assign into the buffer");
 
     bool empty() const noexcept { return count == 0U; }
     std::size_t size() const noexcept { return count; }

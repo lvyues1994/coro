@@ -1,11 +1,14 @@
-// 帧内存储构件：ResultStorage<T> 与 AwaitSlot（内联 + 堆回落）。
+// 帧内存储构件：ResultStorage<T>、AwaitSlot（内联 + 堆回落）与 MoveOnlyFunction。
 
 #include <cstdlib>
 #include <iostream>
+#include <memory>
+#include <type_traits>
 #include <utility>
 
 #include "co2/config.hpp"
 #include "co2/detail/await_slot.hpp"
+#include "co2/detail/move_only_function.hpp"
 #include "co2/detail/result_storage.hpp"
 
 namespace {
@@ -105,10 +108,106 @@ void awaitSlotFallsBackToTheHeapForLargeAwaiters() {
     CHECK(destroyed == 1);
 }
 
+// ---------------------------------------------------------------------------
+// MoveOnlyFunction
+
+using Fn = co2::detail::MoveOnlyFunction<int(int)>;
+
+struct ThreePointers {
+    void* pointers[3];
+    int operator()(int const v) const noexcept { return v; }
+};
+
+struct FourPointers {
+    void* pointers[4];
+    int operator()(int const v) const noexcept { return v; }
+};
+
+struct ThrowingMove {
+    ThrowingMove() = default;
+    ThrowingMove(ThrowingMove&&) {} // 非 noexcept：不能内联重定位
+    int operator()(int const v) const noexcept { return v; }
+};
+
+void moveOnlyFunctionLayoutAndInlineBoundary() {
+    static_assert(sizeof(Fn) == 4U * sizeof(void*),
+                  "MoveOnlyFunction must be the size of std::function");
+    static_assert(std::is_nothrow_move_constructible<Fn>::value &&
+                      std::is_nothrow_move_assignable<Fn>::value,
+                  "moving a MoveOnlyFunction must not throw");
+    static_assert(Fn::isInline<ThreePointers>(), "three pointers fit inline");
+    static_assert(not Fn::isInline<FourPointers>(), "four pointers spill to the heap");
+    static_assert(not Fn::isInline<ThrowingMove>(),
+                  "a throwing move constructor forces heap storage");
+    static_assert(not std::is_copy_constructible<Fn>::value, "move-only");
+}
+
+// 内联与堆两种存储都要正确地：调用、重定位（移动后源为空、目标可用）、析构恰好一次。
+void moveOnlyFunctionOwnsItsCallableInBothStorages() {
+    auto live = 0;
+    {
+        auto tracked = TrackedValue{live};
+        // 捕获一个 TrackedValue（8 字节）：内联。
+        auto inlineFn = Fn{[t = std::move(tracked)](int const v) { return v + 1; }};
+        CHECK(live == 2); // 原 tracked（已移出但仍存活）+ 闭包里的一份
+        CHECK(static_cast<bool>(inlineFn));
+        CHECK(inlineFn(1) == 2);
+
+        auto moved = std::move(inlineFn);
+        CHECK(not inlineFn);
+        CHECK(live == 2); // 重定位：目标构造、源销毁，净数不变
+        CHECK(moved(2) == 3);
+
+        // 堆存储：闭包超过内联容量。
+        auto heapFn = Fn{[t = std::move(tracked), pad = FourPointers{}](int const v) {
+            static_cast<void>(pad);
+            return v * 10;
+        }};
+        CHECK(live == 3);
+        CHECK(heapFn(4) == 40);
+        auto heapMoved = std::move(heapFn);
+        CHECK(not heapFn);
+        CHECK(live == 3); // 偷指针，不构造不销毁
+        CHECK(heapMoved(5) == 50);
+
+        // 移动赋值先销毁目标原有的闭包。
+        heapMoved = std::move(moved);
+        CHECK(not moved);
+        CHECK(live == 2);
+        CHECK(heapMoved(6) == 7);
+
+        heapMoved.reset();
+        CHECK(not heapMoved);
+        CHECK(live == 1);
+    }
+    CHECK(live == 0);
+
+    auto empty = Fn{};
+    CHECK(not empty);
+    auto fromEmpty = std::move(empty);
+    CHECK(not fromEmpty);
+}
+
+void moveOnlyFunctionAcceptsMoveOnlyCallables() {
+    auto owned = std::unique_ptr<int>{new int{41}};
+    auto fn = co2::detail::MoveOnlyFunction<int()>{
+        [p = std::move(owned)]() mutable { return ++*p; }};
+    CHECK(owned == nullptr);
+    CHECK(fn() == 42);
+    CHECK(fn() == 43);
+
+    auto throwingMove = co2::detail::MoveOnlyFunction<int(int)>{ThrowingMove{}};
+    auto relocated = std::move(throwingMove); // 堆存储：即便 F 的移动会抛，这里也不抛
+    CHECK(relocated(9) == 9);
+}
+
 } // namespace
 
 int main() {
     resultStorageOwnsExactlyOneValue();
     awaitSlotFallsBackToTheHeapForLargeAwaiters();
+    moveOnlyFunctionLayoutAndInlineBoundary();
+    moveOnlyFunctionOwnsItsCallableInBothStorages();
+    moveOnlyFunctionAcceptsMoveOnlyCallables();
     return 0;
 }

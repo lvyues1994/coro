@@ -14,6 +14,7 @@
 
 #include "co2/callback.hpp"
 #include "co2/coroutine.hpp"
+#include "co2/detail/await_slot.hpp"
 #include "co2/generator.hpp"
 #include "co2/manual_executor.hpp"
 #include "co2/scheduler.hpp"
@@ -174,7 +175,10 @@ void whenAllInsideATaskAllocatesChildFramesStopStateAndAwaiterSlot() {
 }
 
 auto viaCallback(int v) CO2_BEG(co2::Task<int>, (v), int got{};) {
-    // 闭包只捕获一个 int：落在 std::function 的内联缓冲里，不分配。
+    // 闭包只捕获 this：落在 MoveOnlyFunction 的内联缓冲里，不分配；awaiter 本身也在
+    // 帧的内联 awaiter 槽里。
+    static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>(),
+                  "the callback awaiter must stay within the inline awaiter slot");
     CO2_AWAIT_AS_SET(
         got, co2::CallbackAwaitable<int>,
         co2::fromCallback<int>([this](co2::Continuation<int> done) { done(v); }));
@@ -184,6 +188,28 @@ CO2_END
 
 void callbackAwaiterAllocatesNothingBeyondTheFrame() {
     CHECK_ALLOCATIONS(1, CHECK(co2::syncWait(viaCallback(6)) == 6));
+}
+
+auto viaCallbackWithLargeClosure(std::unique_ptr<int> payload, int a, int b)
+    CO2_BEG(co2::Task<int>, (payload, a, b), int got{};) {
+    // 捕获 this + 一个 unique_ptr + 一个 int（补齐后 24 字节）：正好是 3 个指针的内联
+    // 容量上限，不分配；move-only 捕获也照常编译。
+    CO2_AWAIT_AS_SET(
+        got, co2::CallbackAwaitable<int>,
+        co2::fromCallback<int>([this, p = std::move(payload), sum = a + b](
+                                   co2::Continuation<int> done, co2::stop_token) mutable {
+            done(*p + sum);
+        }));
+    CO2_RETURN(got);
+}
+CO2_END
+
+void callbackAwaiterKeepsAThreePointerClosureInline() {
+    // 帧 1 次；unique_ptr 的 new int 在计数块之外。
+    auto payload = std::unique_ptr<int>{new int{1}};
+    CHECK_ALLOCATIONS(
+        1, CHECK(co2::syncWait(viaCallbackWithLargeClosure(std::move(payload), 2, 3)) ==
+                 6));
 }
 
 void spawnIsTwoAllocationsBeyondTheFrame() {
@@ -232,6 +258,7 @@ int main() {
     whenAllTupleAllocatesChildFramesStopStateAndAwaiterSlot();
     whenAllInsideATaskAllocatesChildFramesStopStateAndAwaiterSlot();
     callbackAwaiterAllocatesNothingBeyondTheFrame();
+    callbackAwaiterKeepsAThreePointerClosureInline();
     spawnIsTwoAllocationsBeyondTheFrame();
     return 0;
 }

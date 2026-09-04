@@ -18,6 +18,8 @@
 
 #include "co2/callback.hpp"
 #include "co2/coroutine.hpp"
+#include "co2/detail/await_slot.hpp"
+#include "co2/detail/result_storage.hpp"
 #include "co2/manual_executor.hpp"
 #include "co2/scheduler.hpp"
 #include "co2/spawn.hpp"
@@ -275,6 +277,41 @@ void setExceptionIsRethrownByAwaitResume() {
     CHECK(thrown);
 }
 
+// T 的构造函数抛出：续体已被 claim，异常改走异常通道，等待仍然完成（否则协程会永远
+// 挂在这个 await 上）。
+struct ThrowsOnConstruction {
+    explicit ThrowsOnConstruction(int) { throw ExpectedError{}; }
+};
+
+auto resultConstructorThrows(FakeApi& api)
+    CO2_BEG(co2::Task<int>, (api), co2::detail::ResultStorage<ThrowsOnConstruction> got;) {
+    CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<ThrowsOnConstruction>,
+                     co2::fromCallback<ThrowsOnConstruction>(
+                         [this](co2::Continuation<ThrowsOnConstruction> done) {
+                             api.asyncGet([done](int const value) mutable {
+                                 done(value); // 就地构造 T 时抛出
+                             });
+                         }));
+    CO2_RETURN(0);
+}
+CO2_END
+
+void throwingResultConstructorCompletesTheAwaitWithTheException() {
+    FakeApi api;
+    auto task = resultConstructorThrows(api);
+    co2::detail::TaskAccess::start(task, co2::noop_coroutine());
+    CHECK(not co2::detail::TaskAccess::isDone(task));
+    api.fire(0); // 回调方不需要捕获任何东西
+    CHECK(co2::detail::TaskAccess::isDone(task));
+    bool thrown = false;
+    try {
+        co2::detail::TaskAccess::takeResult(task);
+    } catch (ExpectedError const&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+}
+
 // ---------------------------------------------------------------------------
 // stop_token 接到 API 的 cancel
 
@@ -350,6 +387,47 @@ void initiateReceivesTheCoroutinesToken() {
 }
 
 // ---------------------------------------------------------------------------
+// move-only 闭包：initiate 以 MoveOnlyFunction 保存，捕获 unique_ptr 也能编译；awaiter
+// 仍然放得进帧的内联 awaiter 槽。
+
+auto ownsItsPayload(std::unique_ptr<int> payload)
+    CO2_BEG(co2::Task<int>, (payload), int got{};) {
+    static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>(),
+                  "the callback awaiter must stay within the inline awaiter slot");
+    CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<int>,
+                     co2::fromCallback<int>([p = std::move(payload)](
+                                                co2::Continuation<int> done) mutable {
+                         done(*p);
+                         p.reset();
+                     }));
+    CO2_RETURN(got);
+}
+CO2_END
+
+auto ownsItsPayloadWithToken(std::unique_ptr<int> payload, bool& sawToken)
+    CO2_BEG(co2::Task<int>, (payload, sawToken), int got{};) {
+    CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<int>,
+                     co2::fromCallback<int>([this, p = std::move(payload)](
+                                                co2::Continuation<int> done,
+                                                co2::stop_token token) mutable {
+                         sawToken = token.stop_possible();
+                         done(*p * 2);
+                     }));
+    CO2_RETURN(got);
+}
+CO2_END
+
+void moveOnlyInitiateClosuresAreAccepted() {
+    CHECK(co2::syncWait(ownsItsPayload(std::unique_ptr<int>{new int{5}})) == 5);
+    bool sawToken = false;
+    co2::stop_source source;
+    CHECK(co2::syncWait(ownsItsPayloadWithToken(std::unique_ptr<int>{new int{6}},
+                                                sawToken),
+                        source.get_token()) == 12);
+    CHECK(sawToken);
+}
+
+// ---------------------------------------------------------------------------
 // 泛型 lambda 与作为 API 包装函数被别的协程等待
 
 auto genericInitiate(int v) CO2_BEG(co2::Task<int>, (v), int got{};) {
@@ -415,9 +493,11 @@ int main() {
     completionRacingWithSuspensionIsResolvedEitherWay();
     exceptionsFromInitiateAreDeliveredIntoTheCoroutine();
     setExceptionIsRethrownByAwaitResume();
+    throwingResultConstructorCompletesTheAwaitWithTheException();
     stopRequestReachesTheApiThroughTheInitiateToken();
     normalCompletionWinsWhenNoStopIsRequested();
     initiateReceivesTheCoroutinesToken();
+    moveOnlyInitiateClosuresAreAccepted();
     wrappedApisComposeLikeAnyTask();
     continuationCanBeStoredAndInvokedLater();
     return 0;

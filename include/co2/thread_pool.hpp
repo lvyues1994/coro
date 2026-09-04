@@ -28,6 +28,11 @@
 //   idleWorkers；停车方先加 idleWorkers、放栅栏、再复查所有队列。二者总有一方看到另
 //   一方，热路径上没有任何共享的 RMW。
 //
+//   这两处栅栏只承担活性（不丢唤醒）。协程帧等数据的可见性不依赖它们：本地队列靠
+//   tail 的 release 存储与 take() 的 acquire 读取，全局队列靠互斥量。ThreadSanitizer
+//   不建模 std::atomic_thread_fence（GCC 报 -Wtsan，tests/CMakeLists.txt 关掉了它），
+//   忽略这两处栅栏也不会让 TSan 误报——栅栏本身仍会被编译进去。
+//
 // 销毁：析构函数请求停止并 join；工作线程把已排队的工作全部跑完才退出（跑的过程中
 // 新排入的也算）。析构期间从外部线程再 schedule 是使用者的错误。
 

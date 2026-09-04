@@ -68,6 +68,7 @@ struct ThreadIds {
     void record() {
         std::lock_guard<std::mutex> lock{mutex};
         ids.insert(std::this_thread::get_id());
+        ++recorded;
     }
 
     std::size_t distinct() {
@@ -75,8 +76,20 @@ struct ThreadIds {
         return ids.size();
     }
 
+    // record() 被调用的总次数。
+    std::size_t total() {
+        std::lock_guard<std::mutex> lock{mutex};
+        return recorded;
+    }
+
+    bool contains(std::thread::id const id) {
+        std::lock_guard<std::mutex> lock{mutex};
+        return ids.count(id) != 0U;
+    }
+
     std::mutex mutex;
     std::set<std::thread::id> ids;
+    std::size_t recorded{};
 };
 
 auto job(co2::ThreadPool& pool, Completion& completion, ThreadIds& ids, int sleepMs,
@@ -267,9 +280,13 @@ void manyConcurrentHoppersFinishWithoutLosingWakeups() {
     for (int i = 0; i < hoppers; ++i)
         hopper(pool, completion, ids, hopsEach);
     completion.waitFor(hoppers);
-    // 只断言"全部完成"：线程分布已由带 sleep 的两个用例覆盖；不 sleep 的 hopper 在
-    // valgrind 这类串行化线程的环境下可能全部落在一个工作线程上。
-    CHECK(ids.distinct() >= 1U);
+    // 结构性断言，任何环境下都成立：每一跳恰好被记录一次（没有丢失的唤醒、没有重复
+    // 恢复），且全部落在工作线程上。线程分布不在这里断言——它已由带 sleep 的两个用例
+    // 覆盖；不 sleep 的 hopper 在 valgrind 这类串行化线程的环境下可能全部落在一个
+    // 工作线程上。
+    CHECK(ids.total() ==
+          static_cast<std::size_t>(hoppers) * static_cast<std::size_t>(hopsEach));
+    CHECK(not ids.contains(std::this_thread::get_id()));
 }
 
 } // namespace

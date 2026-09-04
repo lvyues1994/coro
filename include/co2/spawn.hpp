@@ -8,7 +8,7 @@
 
 #include "co2/contract.hpp"
 #include "co2/coroutine_handle.hpp"
-#include "co2/detail/result_storage.hpp"
+#include "co2/detail/late_init.hpp"
 #include "co2/scheduler.hpp"
 #include "co2/stop_token.hpp"
 #include "co2/task.hpp"
@@ -67,8 +67,9 @@ struct JoinState {
     bool ready{};
     bool detached{};
     stop_source source;
-    ResultStorage<stop_callback<ForwardStop>>
-        forwarding; // 必须晚于 source 构造、先于它析构
+    // stop_callback 不可移动，用 LateInit（与 WhenAllState 一致）而不是 ResultStorage：
+    // 后者的移动构造对它无法实例化。必须晚于 source 构造、先于它析构。
+    LateInit<stop_callback<ForwardStop>> forwarding;
 };
 
 inline FrameHeader* JoinCompletion::complete(FrameHeader* const header) {

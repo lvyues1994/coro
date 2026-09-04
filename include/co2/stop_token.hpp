@@ -17,6 +17,9 @@
 //   的调用线程上同步执行；注册时若已请求则在构造函数里立刻执行；
 //   - ~stop_callback() 若回调正在另一线程上执行，阻塞到它返回；若回调正在本线程执行
 //     （回调销毁了自己的 stop_callback），不阻塞，request_stop() 之后不再触碰该对象；
+//   - 回调可以放掉停止状态的其他全部引用——包括销毁正在调用 request_stop() 的那个
+//     stop_source 所在的对象（whenAll 的等待者被 child 内联恢复后就会这样）：
+//     request_stop() 在派发回调期间自己持有一份状态引用，返回前不再触碰 stop_source；
 //   - stop_possible()：已请求，或仍有关联的 stop_source。
 //
 // 与标准的差别：stop_callback 的 Callback 默认为 std::function<void()>——C++14 没有
@@ -76,23 +79,11 @@ struct StopState {
 
     bool requestStop() noexcept {
         if (requested.exchange(true, std::memory_order_acq_rel)) return false;
-        std::unique_lock<std::mutex> lock{mutex};
-        requestingThread = std::this_thread::get_id();
-        while (head != nullptr) {
-            auto* const node = head;
-            unlink(node);
-            executing = node;
-            auto destroyed = false;
-            node->destroyed = &destroyed;
-            lock.unlock();
-            node->invoke(node);
-            lock.lock();
-            executing = nullptr;
-            if (destroyed) continue; // 回调销毁了自己的 stop_callback：不再触碰节点
-            node->destroyed = nullptr;
-            node->finished = true;
-            callbackFinished.notify_all();
-        }
+        // 回调可能放掉本状态的其他全部引用：destroyed 标志只保护节点，不保护状态本身。
+        // 派发期间自己持有一份，release() 是最后一步——它可能 delete this。
+        acquire();
+        invokeCallbacks();
+        release();
         return true;
     }
 
@@ -124,6 +115,26 @@ struct StopState {
     }
 
   private:
+    void invokeCallbacks() noexcept {
+        std::unique_lock<std::mutex> lock{mutex};
+        requestingThread = std::this_thread::get_id();
+        while (head != nullptr) {
+            auto* const node = head;
+            unlink(node);
+            executing = node;
+            auto destroyed = false;
+            node->destroyed = &destroyed;
+            lock.unlock();
+            node->invoke(node);
+            lock.lock();
+            executing = nullptr;
+            if (destroyed) continue; // 回调销毁了自己的 stop_callback：不再触碰节点
+            node->destroyed = nullptr;
+            node->finished = true;
+            callbackFinished.notify_all();
+        }
+    }
+
     void unlink(StopCallbackNode* const node) noexcept {
         if (node->previous != nullptr)
             node->previous->next = node->next;

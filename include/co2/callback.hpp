@@ -2,12 +2,12 @@
 
 #include <atomic>
 #include <exception>
-#include <functional>
 #include <type_traits>
 #include <utility>
 
 #include "co2/contract.hpp"
 #include "co2/coroutine_handle.hpp"
+#include "co2/detail/move_only_function.hpp"
 #include "co2/detail/result_storage.hpp"
 #include "co2/env.hpp"
 #include "co2/stop_token.hpp"
@@ -31,16 +31,23 @@
 // 完成协议是两方 exchange、第二个到达者负责恢复：续体在 initiate 返回之前就到了
 // （同步完成或另一线程更快）→ await_suspend 返回 false，协程不挂起、内联继续，不长栈；
 // 续体后到 → 协程已挂起，续体所在线程 resume() 它。所有状态都在 awaiter 里——awaiter
-// 被移进帧的 awaiter 槽后地址稳定——没有堆分配（initiate 的闭包超过 std::function 的
-// 内联容量时除外）。
+// 被移进帧的 awaiter 槽后地址稳定——没有堆分配（initiate 的闭包超过 3 个指针的内联
+// 容量时除外）。initiate 以 detail::MoveOnlyFunction 保存：闭包可以捕获 unique_ptr 之类
+// 的 move-only 对象，只要求它可移动。
 //
 // 取消：initiate 可以接收当前协程的 stop_token，用 stop_callback 接到 API 自己的
 // cancel， API
 // 随后以"已取消"回调走正常完成路径。因此不需要为迟到的回调保活任何共享状态。
 //
-// 契约：续体调用恰好一次（第二次是契约违规）；initiate 抛出之后 API 不得再调用续体；
-// awaiter 在 initiate 之后不再移动（核心保证）。协程在续体被调用的线程上恢复（标准
-// 语义），要换线程用 scheduleOn。
+// 契约：续体调用恰好一次；initiate 抛出之后 API 不得再调用续体；awaiter 在 initiate
+// 之后不再移动（核心保证）。协程在续体被调用的线程上恢复（标准语义），要换线程用
+// scheduleOn。
+//
+// 关于"恰好一次"：第一次调用一旦完成，协程就可能（在本线程内联地或在另一线程上）恢复
+// 并销毁这个 awaiter，续体里的裸指针随之悬空。因此第二次调用只有在 awaiter 仍然存活时
+// 才会被诊断为契约违规（contract violation）；一般情况下它是未定义行为，库无法保证
+// 报告。就地构造 T 抛出时，异常会被存进异常通道并照常完成等待——await_resume 重抛它，
+// 协程不会因此挂住。
 
 namespace co2 {
 
@@ -50,11 +57,16 @@ template <class T> struct CallbackAwaitable;
 template <class T> struct Continuation {
     Continuation() noexcept = default;
 
-    // 就地构造结果并完成等待。T 为 void 时不带参数。
+    // 就地构造结果并完成等待。T 为 void 时不带参数。T 的构造抛出时改走异常通道：
+    // 等待仍然完成，否则协程会永远挂在这个 await 上（续体已被 claim，不能再调）。
     template <class... Args> void operator()(Args&&... args) const {
         CO2_CONTRACT_CHECK(operation != nullptr);
         operation->claim();
-        operation->value.emplace(std::forward<Args>(args)...);
+        try {
+            operation->value.emplace(std::forward<Args>(args)...);
+        } catch (...) {
+            operation->error = std::current_exception();
+        }
         operation->complete();
     }
 
@@ -78,13 +90,15 @@ template <class T> struct Continuation {
 };
 
 template <class T> struct CallbackAwaitable {
-    using Initiate = std::function<void(Continuation<T>, stop_token)>;
+    using Initiate = detail::MoveOnlyFunction<void(Continuation<T>, stop_token)>;
 
-    explicit CallbackAwaitable(Initiate initiate_) : initiate{std::move(initiate_)} {
+    explicit CallbackAwaitable(Initiate initiate_) noexcept
+        : initiate{std::move(initiate_)} {
         CO2_CONTRACT_CHECK(static_cast<bool>(initiate));
     }
 
-    // 只允许在启动前移动（awaiter 被移进等待者的帧）。
+    // 只允许在启动前移动（awaiter 被移进等待者的帧）。noexcept 依赖 Initiate 的移动
+    // noexcept——它对内联闭包要求 nothrow 移动，否则把闭包放到堆上。
     CallbackAwaitable(CallbackAwaitable&& other) noexcept
         : initiate{std::move(other.initiate)} {
         CO2_CONTRACT_CHECK(other.state.load(std::memory_order_relaxed) == Initial);

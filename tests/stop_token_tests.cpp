@@ -203,6 +203,47 @@ void concurrentRegistrationAndRequestNeverDoubleInvokeOrLose() {
     }
 }
 
+// 回调放掉了停止状态的其他全部引用——连正在调用 request_stop() 的 stop_source 也一起
+// 销毁（库内 ForwardStop 就是这样：它指向的 source 住在一个可能被回调链拆掉的对象里）。
+// request_stop() 必须在派发期间自己持有状态，否则回调返回后它会触碰已释放的内存。
+void callbackMayReleaseEveryOtherReferenceIncludingTheRequestingSource() {
+    auto source = std::unique_ptr<co2::stop_source>{new co2::stop_source{}};
+    auto callback = std::unique_ptr<co2::stop_callback<>>{};
+    int calls = 0;
+    callback.reset(new co2::stop_callback<>{source->get_token(), [&] {
+        ++calls;
+        source.reset();
+        callback.reset();
+    }});
+    auto* const raw = source.get();
+    CHECK(raw->request_stop());
+    CHECK(calls == 1);
+    CHECK(source == nullptr && callback == nullptr);
+}
+
+// 同一场景，但还有一个回调排在后面：先执行的回调销毁了 stop_source，后执行的回调仍要
+// 运行，并且是它放掉最后一个引用——状态在派发循环仍在进行时到达零引用。
+void laterCallbacksStillRunAfterAnEarlierOneDestroyedTheSource() {
+    auto source = std::unique_ptr<co2::stop_source>{new co2::stop_source{}};
+    std::vector<int> order;
+    std::unique_ptr<co2::stop_callback<>> first;
+    std::unique_ptr<co2::stop_callback<>> second;
+    // 注册顺序 first → second；执行顺序是后注册者先执行（LIFO，与标准实现一致）。
+    first.reset(new co2::stop_callback<>{source->get_token(), [&] {
+        order.push_back(1);
+        first.reset(); // 最后一个引用
+    }});
+    second.reset(new co2::stop_callback<>{source->get_token(), [&] {
+        order.push_back(2);
+        source.reset();
+        second.reset();
+    }});
+    auto* const raw = source.get();
+    CHECK(raw->request_stop());
+    CHECK((order == std::vector<int>{2, 1}));
+    CHECK(source == nullptr && first == nullptr && second == nullptr);
+}
+
 } // namespace
 
 int main() {
@@ -217,5 +258,7 @@ int main() {
     callbackMayDestroyItselfWhileRunning();
     destructorWaitsForACallbackRunningOnAnotherThread();
     concurrentRegistrationAndRequestNeverDoubleInvokeOrLose();
+    callbackMayReleaseEveryOtherReferenceIncludingTheRequestingSource();
+    laterCallbacksStillRunAfterAnEarlierOneDestroyedTheSource();
     return 0;
 }

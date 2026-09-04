@@ -23,6 +23,14 @@ set(co2_contract_violation_test_sources
     async_generator_destroy_contract_violation_test.cpp
     continuation_twice_contract_violation_test.cpp)
 
+include(CheckCXXCompilerFlag)
+
+# GCC 在 -fsanitize=thread 下对 std::atomic_thread_fence 报 -Wtsan（TSan 不建模栅栏），
+# 与 -Werror 一起会让 TSan 构建编不过。thread_pool.hpp 里的两处 seq_cst 栅栏只承担
+# Dekker 协议的活性（不丢唤醒）；数据可见性走队列自身的 release/acquire 与互斥量，TSan
+# 忽略这两处栅栏不会产生误报，因此在支持该选项的编译器上关掉它。Clang 没有 -Wtsan。
+check_cxx_compiler_flag(-Wtsan CO2_COMPILER_HAS_WTSAN)
+
 function(co2_configure_test_target target)
     target_link_libraries(${target} PRIVATE co2::co2)
     set_target_properties(
@@ -51,6 +59,9 @@ function(co2_configure_test_target target)
                 -Werror=uninitialized
                 -Werror=suggest-override
                 -Werror=vla)
+        if(CO2_COMPILER_HAS_WTSAN)
+            target_compile_options(${target} PRIVATE -Wno-tsan)
+        endif()
     endif()
 endfunction()
 
