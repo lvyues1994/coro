@@ -220,6 +220,15 @@ struct TaskAccess {
         return task.handle.promise().result();
     }
 
+    template <class T> static bool hasError(Task<T> const& task) noexcept {
+        return task.handle && task.handle.promise().error != nullptr;
+    }
+
+    template <class T> static void rethrowError(Task<T>& task) {
+        CO2_CONTRACT_CHECK(hasError(task));
+        std::rethrow_exception(task.handle.promise().error);
+    }
+
     // 交出帧的所有权（类型擦除）：调用方负责在完成后 destroy()。
     template <class T> static coroutine_handle<> release(Task<T>& task) noexcept {
         auto const handle = task.handle;

@@ -6,13 +6,22 @@ set(co2_test_sources
     scheduler_tests.cpp
     thread_pool_tests.cpp
     stop_token_tests.cpp
-    spawn_tests.cpp)
+    spawn_tests.cpp
+    when_all_tests.cpp
+    callback_tests.cpp
+    allocation_tests.cpp
+    edge_case_tests.cpp)
 
 # 契约违规测试：程序在预期的失败点经由契约处理器以退出码 86 结束。
 set(co2_contract_violation_test_sources
     task_destroy_contract_violation_test.cpp
     manual_executor_contract_violation_test.cpp
-    join_handle_contract_violation_test.cpp)
+    join_handle_contract_violation_test.cpp
+    generator_begin_twice_contract_violation_test.cpp
+    resume_running_contract_violation_test.cpp
+    thread_pool_zero_threads_contract_violation_test.cpp
+    async_generator_destroy_contract_violation_test.cpp
+    continuation_twice_contract_violation_test.cpp)
 
 function(co2_configure_test_target target)
     target_link_libraries(${target} PRIVATE co2::co2)

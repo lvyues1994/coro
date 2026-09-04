@@ -4,13 +4,13 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include "co2/contract.hpp"
+#include "co2/detail/ring_queue.hpp"
 #include "co2/scheduler.hpp"
 
 // co2 执行层：工作窃取线程池。
@@ -256,15 +256,13 @@ struct ThreadPool final : Scheduler {
 
     void pushGlobal(void* const item) noexcept {
         std::lock_guard<std::mutex> lock{globalMutex};
-        globalQueue.push_back(item);
+        globalQueue.push(item);
     }
 
     void* popGlobal() noexcept {
         std::lock_guard<std::mutex> lock{globalMutex};
         if (globalQueue.empty()) return nullptr;
-        auto* const item = globalQueue.front();
-        globalQueue.pop_front();
-        return item;
+        return globalQueue.pop();
     }
 
     void requestStop() noexcept {
@@ -291,7 +289,7 @@ struct ThreadPool final : Scheduler {
 
     std::vector<std::unique_ptr<Worker>> workers;
     std::mutex globalMutex;
-    std::deque<void*> globalQueue;
+    detail::RingQueue<void*> globalQueue;
     std::mutex parkMutex;
     std::condition_variable parkCv;
     std::size_t pendingWakeups{};

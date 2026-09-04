@@ -2,6 +2,7 @@
 
 // co2 的全部公共头。按需包含单个头文件同样可行，每个头都能独立包含。
 #include "co2/async_generator.hpp"
+#include "co2/callback.hpp"
 #include "co2/config.hpp"
 #include "co2/contract.hpp"
 #include "co2/coroutine.hpp"
@@ -14,3 +15,4 @@
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
 #include "co2/thread_pool.hpp"
+#include "co2/when_all.hpp"

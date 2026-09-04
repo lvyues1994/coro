@@ -267,7 +267,9 @@ void manyConcurrentHoppersFinishWithoutLosingWakeups() {
     for (int i = 0; i < hoppers; ++i)
         hopper(pool, completion, ids, hopsEach);
     completion.waitFor(hoppers);
-    CHECK(ids.distinct() >= 2U);
+    // 只断言"全部完成"：线程分布已由带 sleep 的两个用例覆盖；不 sleep 的 hopper 在
+    // valgrind 这类串行化线程的环境下可能全部落在一个工作线程上。
+    CHECK(ids.distinct() >= 1U);
 }
 
 } // namespace

@@ -306,4 +306,14 @@ template <class Callback> struct stop_callback : private detail::StopCallbackNod
     bool registered{};
 };
 
+namespace detail {
+
+// 把一个 token 的停止请求转发给另一个 source：stop_callback<ForwardStop> 就是父子
+// 取消链的一节。
+struct ForwardStop {
+    stop_source* source;
+    void operator()() const noexcept { source->request_stop(); }
+};
+
+} // namespace detail
 } // namespace co2

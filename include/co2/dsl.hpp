@@ -151,17 +151,20 @@
 #define CO2_AWAIT_SET(variable, expression)                                            \
     CO2_DETAIL_AWAIT(variable =, expression, CO2_DETAIL_SUSPEND_POINT_ID)
 
-// 表达式含 lambda 时 decltype 不可用，显式给出 awaitable 的类型。
+// 表达式含 lambda 时 decltype 不可用，显式给出 awaitable 的类型。类型含逗号（模板实参）
+// 时用括号包裹：CO2_AWAIT_AS((Awaitable<A, B>), e)。
 #define CO2_AWAIT_AS(awaitable_type, expression)                                       \
     CO2_DETAIL_AWAIT_IMPL(                                                             \
-        (::co2::detail::AwaiterFor<_co2_promise_type, awaitable_type>),                \
+        (::co2::detail::AwaiterFor<_co2_promise_type,                                  \
+                                   CO2_DETAIL_PP_REMOVE_PARENS(awaitable_type)>),      \
         static_cast<void>, _co2_context.transform(expression),                         \
         CO2_DETAIL_SUSPEND_POINT_ID)
 
 #define CO2_AWAIT_AS_SET(variable, awaitable_type, expression)                         \
     CO2_DETAIL_AWAIT_IMPL(                                                             \
-        (::co2::detail::AwaiterFor<_co2_promise_type, awaitable_type>), variable =,    \
-        _co2_context.transform(expression), CO2_DETAIL_SUSPEND_POINT_ID)
+        (::co2::detail::AwaiterFor<_co2_promise_type,                                  \
+                                   CO2_DETAIL_PP_REMOVE_PARENS(awaitable_type)>),      \
+        variable =, _co2_context.transform(expression), CO2_DETAIL_SUSPEND_POINT_ID)
 
 // co_yield e ≡ co_await promise.yield_value(e)。
 #define CO2_YIELD(...)                                                                 \

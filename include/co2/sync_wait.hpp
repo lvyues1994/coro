@@ -6,7 +6,9 @@
 #include <utility>
 
 #include "co2/contract.hpp"
+#include "co2/coroutine.hpp"
 #include "co2/coroutine_handle.hpp"
+#include "co2/detail/result_storage.hpp"
 #include "co2/task.hpp"
 
 namespace co2 {
@@ -67,6 +69,55 @@ template <class T> T syncWait(Task<T> task, stop_token token = {}) {
     detail::TaskAccess::start(task, completion.handle(), std::move(token));
     state.wait();
     return detail::TaskAccess::takeResult(task);
+}
+
+namespace detail {
+
+template <class T> struct IsTask : std::false_type {};
+template <class T> struct IsTask<Task<T>> : std::true_type {};
+
+// awaitable 的 await_resume() 类型（不经过任何 await_transform）。
+template <class Awaitable>
+using AwaitResultOf = decltype(std::declval<AwaiterOf<Awaitable>&>().await_resume());
+
+// 把任意 awaitable 包成 Task：syncWait(whenAll(...)) 这类用法多一个帧。
+template <class R, class Awaitable>
+auto awaitableToTask(Awaitable awaitable)
+    CO2_BEG((Task<R>), (awaitable), ResultStorage<R> result;) {
+    CO2_AWAIT_SET(result, std::move(awaitable));
+    CO2_RETURN(result.take());
+}
+CO2_END
+
+template <class R, class Awaitable>
+auto awaitableToVoidTask(Awaitable awaitable) CO2_BEG(Task<void>, (awaitable)) {
+    CO2_AWAIT(std::move(awaitable));
+}
+CO2_END
+
+template <class R, class Awaitable>
+Task<R> wrapAwaitable(Awaitable&& awaitable, std::false_type) {
+    return awaitableToTask<R, typename std::decay<Awaitable>::type>(
+        std::forward<Awaitable>(awaitable));
+}
+
+template <class R, class Awaitable>
+Task<void> wrapAwaitable(Awaitable&& awaitable, std::true_type) {
+    return awaitableToVoidTask<R, typename std::decay<Awaitable>::type>(
+        std::forward<Awaitable>(awaitable));
+}
+
+} // namespace detail
+
+// 任意 awaitable 的同步等待：在一个临时 Task 里 co_await 它。
+template <class Awaitable, class = typename std::enable_if<not detail::IsTask<
+                               typename std::decay<Awaitable>::type>::value>::type>
+detail::AwaitResultOf<Awaitable> syncWait(Awaitable&& awaitable,
+                                          stop_token token = {}) {
+    using Result = detail::AwaitResultOf<Awaitable>;
+    return syncWait(detail::wrapAwaitable<Result>(std::forward<Awaitable>(awaitable),
+                                                  std::is_void<Result>{}),
+                    std::move(token));
 }
 
 } // namespace co2

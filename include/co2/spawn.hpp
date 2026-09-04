@@ -48,11 +48,6 @@ struct JoinCompletion {
     static FrameHeader* complete(FrameHeader* header);
 };
 
-struct ForwardStop {
-    stop_source* source;
-    void operator()() const noexcept { source->request_stop(); }
-};
-
 // JoinHandle 与完成帧共享的状态。两方都可能是最后离开的一方：Task 先完成则 JoinHandle
 // 析构时释放；JoinHandle 先析构（分离）则完成时释放。
 struct JoinState {

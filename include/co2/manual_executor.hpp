@@ -1,10 +1,10 @@
 #pragma once
 
 #include <cstddef>
-#include <deque>
 #include <mutex>
 
 #include "co2/contract.hpp"
+#include "co2/detail/ring_queue.hpp"
 #include "co2/scheduler.hpp"
 
 namespace co2 {
@@ -22,7 +22,7 @@ struct ManualExecutor final : Scheduler {
     void schedule(coroutine_handle<> const coroutine) noexcept override {
         CO2_CONTRACT_CHECK(coroutine);
         std::lock_guard<std::mutex> lock{mutex};
-        ready.push_back(coroutine);
+        ready.push(coroutine);
     }
 
     // 恢复队首的一个协程；队列为空时返回 false。
@@ -31,8 +31,7 @@ struct ManualExecutor final : Scheduler {
         {
             std::lock_guard<std::mutex> lock{mutex};
             if (ready.empty()) return false;
-            next = ready.front();
-            ready.pop_front();
+            next = ready.pop();
         }
         next.resume();
         return true;
@@ -53,7 +52,7 @@ struct ManualExecutor final : Scheduler {
 
   private:
     mutable std::mutex mutex;
-    std::deque<coroutine_handle<>> ready;
+    detail::RingQueue<coroutine_handle<>> ready;
 };
 
 } // namespace co2
