@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    name: ${{ matrix.compiler }} Debug
+    name: ${{ matrix.compiler }} ${{ matrix.build_type }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -20,8 +20,13 @@ jobs:
         include:
           - compiler: g++
             cxx: g++
+            build_type: Debug
+          - compiler: g++
+            cxx: g++
+            build_type: Release
           - compiler: clang++
             cxx: clang++
+            build_type: Debug
             packages: clang
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +39,7 @@ jobs:
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
 
       - name: Build
@@ -109,6 +114,7 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCO2_BUILD_TESTS=OFF \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/prefix"
           cmake --build build
           cmake --install build

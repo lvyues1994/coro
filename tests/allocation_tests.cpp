@@ -231,6 +231,14 @@ void spawnIsTwoAllocationsBeyondTheFrame() {
 } // namespace
 
 // 计数的全局 operator new/delete。
+// GCC 在 -O2/-O3 下会把下面的 operator delete 内联，看到 free() 作用于 operator new 返回的
+// 指针就报 -Wmismatched-new-delete——它不知道这里的 operator new 本身就是 malloc 实现的。
+// 这是替换全局分配函数时的已知误报，只在本文件里关掉。
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void* operator new(std::size_t const size) {
     allocations.fetch_add(1, std::memory_order_relaxed);
     if (auto* const pointer = std::malloc(size == 0U ? 1U : size)) return pointer;
@@ -239,6 +247,10 @@ void* operator new(std::size_t const size) {
 
 void operator delete(void* const pointer) noexcept { std::free(pointer); }
 void operator delete(void* const pointer, std::size_t) noexcept { std::free(pointer); }
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 int main() {
     // valgrind 等工具会用自己的 operator new 插入到本文件的替换之前：那时计数为零，
