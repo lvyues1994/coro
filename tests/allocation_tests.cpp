@@ -192,14 +192,15 @@ void callbackAwaiterAllocatesNothingBeyondTheFrame() {
 
 auto viaCallbackWithLargeClosure(std::unique_ptr<int> payload, int a, int b)
     CO2_BEG(co2::Task<int>, (payload, a, b), int got{};) {
-    // 捕获 this + 一个 unique_ptr + 一个 int（补齐后 24 字节）：正好是 3 个指针的内联
+    // 捕获 unique_ptr + 一个指针 + 一个 int（补齐后 24 字节）：正好是 3 个指针的内联
     // 容量上限，不分配；move-only 捕获也照常编译。
     CO2_AWAIT_AS_SET(
         got, co2::CallbackAwaitable<int>,
-        co2::fromCallback<int>([this, p = std::move(payload), sum = a + b](
-                                   co2::Continuation<int> done, co2::stop_token) mutable {
-            done(*p + sum);
-        }));
+        co2::fromCallback<int>(
+            [p = std::move(payload), pad = static_cast<void*>(nullptr), sum = a + b](
+                co2::Continuation<int> done, co2::stop_token) mutable {
+                done(*p + sum + (pad == nullptr ? 0 : 1));
+            }));
     CO2_RETURN(got);
 }
 CO2_END
