@@ -175,15 +175,23 @@ void whenAllInsideATaskAllocatesChildFramesStopStateAndAwaiterSlot() {
     CHECK_ALLOCATIONS(5, CHECK(co2::syncWait(awaitsWhenAll()) == 3));
 }
 
-// CallbackAwaitable<int> 的布局：MoveOnlyFunction 4 指针 + 句柄 + 结果 + exception_ptr +
-// 两个原子。libstdc++/libc++ 的 exception_ptr 是 1 个指针，总计正好 8 指针，放得进内联
-// awaiter 槽；MSVC 的 exception_ptr 是 2 个指针，多出的 8 字节让它回落到堆上，每次
-// 回调等待多 1 次分配。
-constexpr bool callbackAwaiterIsInline =
-    co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>();
-static_assert(callbackAwaiterIsInline == (sizeof(std::exception_ptr) == sizeof(void*)),
-              "the callback awaiter is inline exactly when exception_ptr is one pointer");
-constexpr int callbackAwaiterAllocations = callbackAwaiterIsInline ? 0 : 1;
+// CallbackAwaitable<T> 的布局：MoveOnlyFunction（4 指针）+ 句柄 + T + 原子状态字 +
+// exception_ptr，四个标志共用一个状态字，结果不带自己的 engaged 标志。int 与 void 的
+// awaiter 在 exception_ptr 为 1 指针（libstdc++/libc++）或 2 指针（MSVC）时都放得进
+// 8 指针的内联 awaiter 槽；超过 4 字节的 T 在 MSVC 上回落到堆，见下方的 largeResult。
+template <class T>
+using CallbackAwaiterSize =
+    std::integral_constant<std::size_t, 5U * sizeof(void*) + sizeof(T) +
+                                            sizeof(std::atomic<unsigned>) +
+                                            sizeof(std::exception_ptr)>;
+static_assert(sizeof(co2::CallbackAwaitable<int>) == CallbackAwaiterSize<int>::value,
+              "CallbackAwaitable<int> must carry no padding beyond its five words");
+static_assert(sizeof(co2::CallbackAwaitable<void>) <= CallbackAwaiterSize<int>::value,
+              "CallbackAwaitable<void> must be no larger than the int one");
+static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>(),
+              "CallbackAwaitable<int> must stay within the inline awaiter slot");
+static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<void>>(),
+              "CallbackAwaitable<void> must stay within the inline awaiter slot");
 
 auto viaCallback(int v) CO2_BEG(co2::Task<int>, (v), int got{};) {
     // 闭包只捕获 this：落在 MoveOnlyFunction 的内联缓冲里，不分配。
@@ -195,8 +203,49 @@ auto viaCallback(int v) CO2_BEG(co2::Task<int>, (v), int got{};) {
 CO2_END
 
 void callbackAwaiterAllocatesNothingBeyondTheFrame() {
-    CHECK_ALLOCATIONS(1 + callbackAwaiterAllocations,
-                      CHECK(co2::syncWait(viaCallback(6)) == 6));
+    CHECK_ALLOCATIONS(1, CHECK(co2::syncWait(viaCallback(6)) == 6));
+}
+
+auto viaVoidCallback(int& counter) CO2_BEG(co2::Task<>, (counter)) {
+    CO2_AWAIT_AS(co2::CallbackAwaitable<void>,
+                 co2::fromCallback<void>([this](co2::Continuation<void> done) {
+                     ++counter;
+                     done();
+                 }));
+    CO2_RETURN();
+}
+CO2_END
+
+void voidCallbackAwaiterAllocatesNothingBeyondTheFrame() {
+    int counter = 0;
+    CHECK_ALLOCATIONS(1, co2::syncWait(viaVoidCallback(counter)));
+    CHECK(counter == 1);
+}
+
+// 结果类型超过内联槽时 awaiter 退化为一次堆分配，行为不变。8 个指针大小的结果在任何
+// 平台都放不进：5 指针 + 8 指针 > 8 指针。
+struct WideResult {
+    void const* words[8];
+};
+static_assert(not co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<WideResult>>(),
+              "an eight-word result must push the callback awaiter out of the slot");
+
+int const wideSentinel = 0;
+
+auto viaWideCallback() CO2_BEG(co2::Task<WideResult>, (), WideResult got{};) {
+    CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<WideResult>,
+                     co2::fromCallback<WideResult>([](co2::Continuation<WideResult> done) {
+                         WideResult result{};
+                         result.words[7] = &wideSentinel;
+                         done(result);
+                     }));
+    CO2_RETURN(got);
+}
+CO2_END
+
+void oversizedCallbackAwaiterFallsBackToOneHeapAllocation() {
+    // 帧 1 + awaiter 槽回落 1。
+    CHECK_ALLOCATIONS(2, CHECK(co2::syncWait(viaWideCallback()).words[7] == &wideSentinel));
 }
 
 auto viaCallbackWithLargeClosure(std::unique_ptr<int> payload, int a, int b)
@@ -215,11 +264,11 @@ auto viaCallbackWithLargeClosure(std::unique_ptr<int> payload, int a, int b)
 CO2_END
 
 void callbackAwaiterKeepsAThreePointerClosureInline() {
-    // 帧 1 次（MSVC 上再加 awaiter 槽回落）；unique_ptr 的 new int 在计数块之外。
+    // 帧 1 次；unique_ptr 的 new int 在计数块之外。
     auto payload = std::unique_ptr<int>{new int{1}};
     CHECK_ALLOCATIONS(
-        1 + callbackAwaiterAllocations,
-        CHECK(co2::syncWait(viaCallbackWithLargeClosure(std::move(payload), 2, 3)) == 6));
+        1, CHECK(co2::syncWait(viaCallbackWithLargeClosure(std::move(payload), 2, 3)) ==
+                 6));
 }
 
 void spawnIsTwoAllocationsBeyondTheFrame() {
@@ -280,6 +329,8 @@ int main() {
     whenAllTupleAllocatesChildFramesStopStateAndAwaiterSlot();
     whenAllInsideATaskAllocatesChildFramesStopStateAndAwaiterSlot();
     callbackAwaiterAllocatesNothingBeyondTheFrame();
+    voidCallbackAwaiterAllocatesNothingBeyondTheFrame();
+    oversizedCallbackAwaiterFallsBackToOneHeapAllocation();
     callbackAwaiterKeepsAThreePointerClosureInline();
     spawnIsTwoAllocationsBeyondTheFrame();
     return 0;

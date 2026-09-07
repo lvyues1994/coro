@@ -8,7 +8,7 @@
 #include "co2/contract.hpp"
 #include "co2/coroutine_handle.hpp"
 #include "co2/detail/move_only_function.hpp"
-#include "co2/detail/result_storage.hpp"
+#include "co2/detail/uninitialized.hpp"
 #include "co2/env.hpp"
 #include "co2/stop_token.hpp"
 
@@ -28,12 +28,17 @@
 // continuation(args...) （就地构造 T）或
 // continuation.setException(eptr)，**恰好一次**。
 //
-// 完成协议是两方 exchange、第二个到达者负责恢复：续体在 initiate 返回之前就到了
+// 完成协议是两方 fetch_or、第二个到达者负责恢复：续体在 initiate 返回之前就到了
 // （同步完成或另一线程更快）→ await_suspend 返回 false，协程不挂起、内联继续，不长栈；
 // 续体后到 → 协程已挂起，续体所在线程 resume() 它。所有状态都在 awaiter 里——awaiter
 // 被移进帧的 awaiter 槽后地址稳定——没有堆分配（initiate 的闭包超过 3 个指针的内联
 // 容量时除外）。initiate 以 detail::MoveOnlyFunction 保存：闭包可以捕获 unique_ptr 之类
 // 的 move-only 对象，只要求它可移动。
+//
+// 布局：Armed / Completed / Claimed / HasValue 四个标志共用一个原子字，结果放在无标志的
+// Uninitialized<T> 里。CallbackAwaitable<T> = MoveOnlyFunction（4 指针）+ 句柄 + T +
+// 状态字 + exception_ptr；T 不超过 4 字节时，即使 exception_ptr 是 2 个指针（MSVC），
+// 也放得进 8 指针的内联 awaiter 槽。
 //
 // 取消：initiate 可以接收当前协程的 stop_token，用 stop_callback 接到 API 自己的
 // cancel， API
@@ -62,12 +67,14 @@ template <class T> struct Continuation {
     template <class... Args> void operator()(Args&&... args) const {
         CO2_CONTRACT_CHECK(operation != nullptr);
         operation->claim();
+        unsigned outcome = CallbackAwaitable<T>::HasValue;
         try {
-            operation->value.emplace(std::forward<Args>(args)...);
+            operation->value.construct(std::forward<Args>(args)...);
         } catch (...) {
             operation->error = std::current_exception();
+            outcome = 0U;
         }
-        operation->complete();
+        operation->complete(outcome);
     }
 
     // 以异常完成等待：await_resume 重抛它。
@@ -75,7 +82,7 @@ template <class T> struct Continuation {
         CO2_CONTRACT_CHECK(operation != nullptr && error != nullptr);
         operation->claim();
         operation->error = std::move(error);
-        operation->complete();
+        operation->complete(0U);
     }
 
     explicit operator bool() const noexcept { return operation != nullptr; }
@@ -101,12 +108,17 @@ template <class T> struct CallbackAwaitable {
     // noexcept——它对内联闭包要求 nothrow 移动，否则把闭包放到堆上。
     CallbackAwaitable(CallbackAwaitable&& other) noexcept
         : initiate{std::move(other.initiate)} {
-        CO2_CONTRACT_CHECK(other.state.load(std::memory_order_relaxed) == Initial);
+        CO2_CONTRACT_CHECK(other.state.load(std::memory_order_relaxed) == 0U);
     }
 
     CallbackAwaitable(CallbackAwaitable const&) = delete;
     CallbackAwaitable& operator=(CallbackAwaitable const&) = delete;
     CallbackAwaitable& operator=(CallbackAwaitable&&) = delete;
+
+    // 结果一般在 await_resume 里被取走；留在这里的只有 take 时移动构造抛出的那一份。
+    ~CallbackAwaitable() {
+        if (hasValue()) value.destroy();
+    }
 
     bool await_ready() const noexcept { return false; }
 
@@ -115,36 +127,63 @@ template <class T> struct CallbackAwaitable {
     bool await_suspend(coroutine_handle<Parent> const awaiting) {
         waiter = awaiting;
         initiate(Continuation<T>{this}, detail::stopTokenOf(awaiting));
-        // 续体已经到了：不挂起，内联继续。
-        return state.exchange(Armed, std::memory_order_acq_rel) != Completed;
+        // 续体已经到了：不挂起，内联继续。acquire 与 complete() 的 release 配对，让
+        // 结果与 HasValue 对本线程可见。
+        return (state.fetch_or(Armed, std::memory_order_acq_rel) & Completed) == 0U;
     }
 
     T await_resume() {
         if (error) std::rethrow_exception(error);
-        CO2_CONTRACT_CHECK(value.hasValue());
-        return value.take();
+        CO2_CONTRACT_CHECK(hasValue());
+        return take(std::is_void<T>{});
     }
 
   private:
-    enum : unsigned { Initial, Armed, Completed };
+    // 一个原子字承载全部状态：
+    //   Armed      await_suspend 已收尾，协程挂起中（由等待方置位）
+    //   Completed  续体已经到达（由完成方置位）
+    //   Claimed    续体已被调用过——"恰好一次"的诊断依据
+    //   HasValue   value 里有一个已构造的 T（与 Completed 一起、以 release 发布）
+    enum : unsigned { Armed = 1U, Completed = 2U, Claimed = 4U, HasValue = 8U };
 
     // 续体只能调用一次。
     void claim() noexcept {
-        CO2_CONTRACT_CHECK(not claimed.exchange(true, std::memory_order_acq_rel));
+        CO2_CONTRACT_CHECK(
+            (state.fetch_or(Claimed, std::memory_order_acq_rel) & Claimed) == 0U);
     }
 
     // 第二个到达者负责恢复：await_suspend 已经收尾（Armed）则协程正挂着，在这里恢复它。
-    void complete() {
-        if (state.exchange(Completed, std::memory_order_acq_rel) == Armed)
+    // outcome 是 HasValue 或 0，与 Completed 一次写入，结果的发布和完成信号不可分。
+    void complete(unsigned const outcome) {
+        if ((state.fetch_or(Completed | outcome, std::memory_order_acq_rel) & Armed) !=
+            0U)
             waiter.resume();
+    }
+
+    bool hasValue() const noexcept {
+        return (state.load(std::memory_order_relaxed) & HasValue) != 0U;
+    }
+
+    // 圆括号是有意的：泛型 T 上花括号可能选中 initializer_list 构造函数。移动构造抛出
+    // 时对象保留、HasValue 不清，析构函数仍会清理。
+    T take(std::false_type) {
+        T result(std::move(value.get()));
+        dropValue();
+        return result;
+    }
+
+    void take(std::true_type) noexcept { dropValue(); }
+
+    void dropValue() noexcept {
+        value.destroy();
+        state.fetch_and(~HasValue, std::memory_order_relaxed);
     }
 
     Initiate initiate;
     coroutine_handle<> waiter;
-    detail::ResultStorage<T> value;
+    detail::Uninitialized<T> value;
+    std::atomic<unsigned> state{0U};
     std::exception_ptr error;
-    std::atomic<unsigned> state{Initial};
-    std::atomic<bool> claimed{false};
 
     friend struct Continuation<T>;
 };

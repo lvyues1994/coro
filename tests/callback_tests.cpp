@@ -312,6 +312,140 @@ void throwingResultConstructorCompletesTheAwaitWithTheException() {
 }
 
 // ---------------------------------------------------------------------------
+// 结果的生命周期：awaiter 里的 T 没有自己的 engaged 标志，"有没有对象"记在原子状态字
+// 的 HasValue 位上。这里核对每条路径上构造与析构都恰好配对。
+
+struct Tracked {
+    static std::atomic<int> live;
+    static std::atomic<int> constructed;
+    static bool throwOnMove; // 只在单线程用例里改动
+
+    explicit Tracked(int const payload_) : payload{payload_} {
+        ++live;
+        ++constructed;
+    }
+
+    Tracked(Tracked&& other) : payload{other.payload} {
+        if (throwOnMove) throw ExpectedError{};
+        ++live;
+        ++constructed;
+    }
+
+    Tracked(Tracked const&) = delete;
+    Tracked& operator=(Tracked const&) = delete;
+    Tracked& operator=(Tracked&&) = delete;
+
+    ~Tracked() { --live; }
+
+    int payload;
+};
+
+std::atomic<int> Tracked::live{0};
+std::atomic<int> Tracked::constructed{0};
+bool Tracked::throwOnMove = false;
+
+auto trackedSynchronously(int v)
+    CO2_BEG(co2::Task<int>, (v), co2::detail::ResultStorage<Tracked> got;) {
+    CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<Tracked>,
+                     co2::fromCallback<Tracked>(
+                         [this](co2::Continuation<Tracked> done) { done(v); }));
+    CO2_RETURN(got.get().payload);
+}
+CO2_END
+
+// 续体在另一线程上调用，结果在那里就地构造、在恢复后的协程里取走。
+auto trackedFromAnotherThread(std::vector<std::thread>& threads, int v)
+    CO2_BEG(co2::Task<int>, (threads, v), co2::detail::ResultStorage<Tracked> got;) {
+    CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<Tracked>,
+                     co2::fromCallback<Tracked>([this](co2::Continuation<Tracked> done) {
+                         threads.emplace_back([done, this]() mutable { done(v); });
+                     }));
+    CO2_RETURN(got.get().payload);
+}
+CO2_END
+
+void resultIsConstructedOnceAndDestroyedOnce() {
+    Tracked::constructed = 0;
+    CHECK(co2::syncWait(trackedSynchronously(7)) == 7);
+    CHECK(Tracked::live == 0);
+    // 就地构造 1 次 + await_resume 移出 1 次 + 帧局部 got 接收 1 次。
+    CHECK(Tracked::constructed == 3);
+
+    for (int round = 0; round < 200; ++round) {
+        Tracked::constructed = 0;
+        std::vector<std::thread> threads;
+        CHECK(co2::syncWait(trackedFromAnotherThread(threads, round)) == round);
+        for (auto& thread : threads)
+            thread.join();
+        CHECK(Tracked::live == 0);
+        CHECK(Tracked::constructed == 3);
+    }
+}
+
+// await_resume 移出结果时移动构造抛出：异常进入协程体，留在 awaiter 里的那一份由
+// awaiter 的析构函数清理，不重复析构。
+struct ThrowOnMoveScope {
+    ThrowOnMoveScope() { Tracked::throwOnMove = true; }
+    ~ThrowOnMoveScope() { Tracked::throwOnMove = false; }
+};
+
+void throwingMoveOutOfTheAwaiterIsCleanedUpExactlyOnce() {
+    Tracked::constructed = 0;
+    bool thrown = false;
+    {
+        ThrowOnMoveScope const scope;
+        try {
+            co2::syncWait(trackedSynchronously(1));
+        } catch (ExpectedError const&) {
+            thrown = true;
+        }
+    }
+    CHECK(thrown);
+    CHECK(Tracked::live == 0);
+    CHECK(Tracked::constructed == 1); // 只有就地构造的那一份
+}
+
+// 续体先到再调 setException：错误通道优先，不会有结果对象残留。
+auto voidCompletesWithException() CO2_BEG(co2::Task<>, ()) {
+    CO2_AWAIT_AS(co2::CallbackAwaitable<void>,
+                 co2::fromCallback<void>([](co2::Continuation<void> done) {
+                     done.setException(std::make_exception_ptr(ExpectedError{}));
+                 }));
+    CO2_RETURN();
+}
+CO2_END
+
+auto voidCompletesFromAnotherThread(std::vector<std::thread>& threads, int& hits)
+    CO2_BEG(co2::Task<>, (threads, hits)) {
+    CO2_AWAIT_AS(co2::CallbackAwaitable<void>,
+                 co2::fromCallback<void>([this](co2::Continuation<void> done) {
+                     threads.emplace_back([done]() mutable { done(); });
+                 }));
+    ++hits;
+    CO2_RETURN();
+}
+CO2_END
+
+void voidResultsTakeBothChannels() {
+    bool thrown = false;
+    try {
+        co2::syncWait(voidCompletesWithException());
+    } catch (ExpectedError const&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+
+    int hits = 0;
+    for (int round = 0; round < 200; ++round) {
+        std::vector<std::thread> threads;
+        co2::syncWait(voidCompletesFromAnotherThread(threads, hits));
+        for (auto& thread : threads)
+            thread.join();
+    }
+    CHECK(hits == 200);
+}
+
+// ---------------------------------------------------------------------------
 // stop_token 接到 API 的 cancel
 
 auto cancellable(FakeApi& api, co2::ThreadPool& pool)
@@ -386,9 +520,8 @@ void initiateReceivesTheCoroutinesToken() {
 }
 
 // ---------------------------------------------------------------------------
-// move-only 闭包：initiate 以 MoveOnlyFunction 保存，捕获 unique_ptr 也能编译。awaiter
-// 是否放得进帧的内联槽取决于 exception_ptr 的大小（1 指针的 libstdc++/libc++ 放得进，
-// 2 指针的 MSVC 放不进），分配次数由 allocation_tests 按平台核对。
+// move-only 闭包：initiate 以 MoveOnlyFunction 保存，捕获 unique_ptr 也能编译；awaiter
+// 的布局与内联性由 allocation_tests 核对。
 
 auto ownsItsPayload(std::unique_ptr<int> payload)
     CO2_BEG(co2::Task<int>, (payload), int got{};) {
@@ -492,6 +625,9 @@ int main() {
     exceptionsFromInitiateAreDeliveredIntoTheCoroutine();
     setExceptionIsRethrownByAwaitResume();
     throwingResultConstructorCompletesTheAwaitWithTheException();
+    resultIsConstructedOnceAndDestroyedOnce();
+    throwingMoveOutOfTheAwaiterIsCleanedUpExactlyOnce();
+    voidResultsTakeBothChannels();
     stopRequestReachesTheApiThroughTheInitiateToken();
     normalCompletionWinsWhenNoStopIsRequested();
     initiateReceivesTheCoroutinesToken();
