@@ -294,6 +294,10 @@ find_package(co2 CONFIG REQUIRED)
 target_link_libraries(my-target PRIVATE co2::co2)
 ```
 
+MSVC 需要 VS 2019 16.5 或更新版本，且协程 DSL 依赖一致预处理器 `/Zc:preprocessor`。
+通过 CMake 链接 `co2::co2` 会自动带上该选项；手工配置的工程需自行添加，否则
+`preprocessor.hpp` 会以明确的 `#error` 提示。
+
 当前 `0.2.0-pre` 是预览包。CMake 的数字版本请求无法表达 `-pre`，因此该包允许不带
 版本的 CONFIG 查找，但会拒绝 `find_package(co2 0.2.0 EXACT)`，不会伪装成正式
 `0.2.0`。0.x 稳定包也只承诺精确版本匹配。

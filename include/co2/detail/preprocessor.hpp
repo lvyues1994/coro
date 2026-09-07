@@ -3,6 +3,16 @@
 // 协程 DSL 使用的小型无依赖预处理器子集。
 // 捕获 tuple 当前支持零到八个参数名。
 
+// 下面的宏依赖标准的 __VA_ARGS__ 展开。MSVC 的传统预处理器把 __VA_ARGS__ 当成单个记号
+// 传给嵌套宏，IS_PAREN / NARG / IS_EMPTY 会全部失效，报出一堆 C4002/C4003 与后续语法
+// 错误。VS 2019 16.5 起的一致预处理器（/Zc:preprocessor）把 _MSVC_TRADITIONAL 定义为 0；
+// 这里提前给出明确的错误，而不是让使用者面对宏展开残骸。通过 CMake 链接 co2::co2 会
+// 自动带上该选项。
+#if defined(_MSC_VER) && !defined(__clang__) &&                                        \
+    (!defined(_MSVC_TRADITIONAL) || _MSVC_TRADITIONAL)
+#error "co2's coroutine DSL requires the conforming preprocessor on MSVC: compile with /Zc:preprocessor (VS 2019 16.5 or newer)"
+#endif
+
 #define CO2_DETAIL_PP_CAT(left, right) CO2_DETAIL_PP_CAT_I(left, right)
 #define CO2_DETAIL_PP_CAT_I(left, right) left##right
 

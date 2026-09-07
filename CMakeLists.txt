@@ -14,6 +14,11 @@ add_library(co2::co2 ALIAS co2)
 
 target_compile_features(co2 INTERFACE cxx_std_14)
 target_link_libraries(co2 INTERFACE Threads::Threads)
+# 协程 DSL 的预处理器元编程依赖标准的 __VA_ARGS__ 展开；MSVC 的传统预处理器把它当成单个
+# 记号传给嵌套宏，会拆坏 IS_PAREN / NARG / IS_EMPTY。VS 2019 16.5 起提供的一致预处理器
+# 由 /Zc:preprocessor 开启，作为 INTERFACE 选项随 co2::co2 传给消费方。clang-cl 的
+# 预处理器本身就是一致的，CXX_COMPILER_ID 为 Clang，不会命中。
+target_compile_options(co2 INTERFACE $<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor>)
 target_include_directories(
     co2
     INTERFACE
