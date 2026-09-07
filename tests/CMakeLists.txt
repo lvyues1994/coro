@@ -41,7 +41,11 @@ function(co2_configure_test_target target)
             CXX_EXTENSIONS NO)
 
     if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /WX)
+        # /permissive- 走标准一致模式（两阶段查找、替代记号等）。不加 /Zc:__cplusplus，
+        # 让 config.hpp 的 _MSVC_LANG 版本判断在 CI 里真正被测到。
+        # C4324：alignas 导致结构体填充——AwaitSlot / MoveOnlyFunction 的内联缓冲刻意如此。
+        # C4127：条件表达式为常量——C++14 没有 if constexpr，模板里依赖 T 的 if 必然如此。
+        target_compile_options(${target} PRIVATE /W4 /WX /permissive- /wd4324 /wd4127)
     else()
         target_compile_options(
             ${target}

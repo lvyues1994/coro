@@ -3,6 +3,8 @@
 #include <atomic>
 #include <exception>
 
+#include "co2/config.hpp"
+
 namespace co2 {
 
 // 一次契约违规的诊断信息。condition 是被违反的条件文本或说明。

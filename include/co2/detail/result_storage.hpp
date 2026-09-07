@@ -6,6 +6,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "co2/config.hpp"
+
 namespace co2 {
 namespace detail {
 

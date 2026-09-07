@@ -9,6 +9,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "co2/config.hpp"
+
 // co2：与 C++20 [thread.stoptoken] 同形的协作式取消：stop_source / stop_token /
 // stop_callback。语义逐条对齐标准：
 //
