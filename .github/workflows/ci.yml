@@ -49,12 +49,20 @@ jobs:
         run: ctest --test-dir build --output-on-failure --timeout 120
 
   msvc:
-    name: MSVC ${{ matrix.build_type }}
-    runs-on: windows-latest
+    name: MSVC ${{ matrix.toolset }} ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # windows-latest 自 2026-06 起是 VS 2026（v145）；windows-2022 保留 VS 2022（v143），
+        # 覆盖仍在广泛使用的上一代工具集。include 只给组合补上可读的名字。
+        os: [windows-latest, windows-2022]
         build_type: [Debug, Release]
+        include:
+          - os: windows-latest
+            toolset: VS2026
+          - os: windows-2022
+            toolset: VS2022
     steps:
       - uses: actions/checkout@v4
 
