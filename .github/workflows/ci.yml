@@ -48,6 +48,26 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 120
 
+  msvc:
+    name: MSVC ${{ matrix.build_type }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Visual Studio 生成器是多配置的：配置阶段不指定类型，构建与测试时用 --config / -C。
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }}
+
+      - name: Test
+        run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --timeout 120
+
   asan:
     name: ASan + UBSan
     runs-on: ubuntu-latest
