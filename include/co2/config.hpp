@@ -27,3 +27,15 @@
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <iso646.h>
 #endif
+
+// MSVC 的 C47xx 是代码生成阶段的警告：以函数开括号处的警告状态为准，函数体内再改无效。
+// DSL 展开的 switch 状态机在 co_return 之后必然留下不可达的 break / 收尾语句，GCC 与
+// Clang 不报，MSVC /W4 报 C4702。dsl.hpp 用这两个宏把生成的函数包起来。
+#if defined(_MSC_VER) && !defined(__clang__)
+#define CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(number)                                   \
+    __pragma(warning(push)) __pragma(warning(disable : number))
+#define CO2_DETAIL_MSVC_WARNING_POP __pragma(warning(pop))
+#else
+#define CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(number)
+#define CO2_DETAIL_MSVC_WARNING_POP
+#endif

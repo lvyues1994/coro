@@ -13,6 +13,10 @@
 #include "co2/detail/await_slot.hpp"
 #include "co2/detail/awaitable.hpp"
 
+// 帧的恢复/收尾路径把状态机（Body::operator()）内联进来后，MSVC 会把 co_return 之后的
+// 收尾判成不可达并报到本文件的行号上；C4702 以函数开括号处的状态为准，见 config.hpp。
+CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(4702)
+
 // co2 核心：协程帧与 ramp。执行 [dcl.fct.def.coroutine] 规定的协程体变换：
 //
 //   promise-type promise promise-constructor-arguments;
@@ -219,14 +223,6 @@ template <class Promise> struct HasAllocationFailureObject {
     static constexpr bool value = decltype(probe<Promise>(0))::value;
 };
 
-template <class Return, class Promise> Return allocationFailureObject(std::true_type) {
-    return Promise::get_return_object_on_allocation_failure();
-}
-
-template <class Return, class Promise> Return allocationFailureObject(std::false_type) {
-    throw std::bad_alloc{};
-}
-
 // ---- 完整的帧 ----
 
 template <class Promise, class Params, class Body, class Allocator>
@@ -391,17 +387,11 @@ using DefaultFrameAllocator = std::allocator<unsigned char>;
 // 分配帧 → 构造 promise → get_return_object → co_await initial_suspend。不挂起的
 // 协程在这里直接运行；初始挂起点之前的异常销毁帧并抛给调用方。
 
-template <class Return, class Promise, class Body, class Params, class Allocator>
-Return startCoroutine(Params params, Allocator const& allocator) {
-    using Frame = CoroutineFrame<Promise, Params, Body, Allocator>;
+// 帧已分配：get_return_object → co_await initial_suspend。
+template <class Return, class Promise, class Params, class Body, class Allocator>
+Return runRamp(CoroutineFrame<Promise, Params, Body, Allocator>& frame) {
     using Core = FrameCore<Promise, Params, Body>;
-
-    auto* const frame = Frame::create(std::move(params), allocator);
-    if (frame == nullptr) {
-        return allocationFailureObject<Return, Promise>(
-            typename Frame::HasFailureObject{});
-    }
-    auto& core = frame->core;
+    auto& core = frame.core;
 
     struct DestroyOnException {
         FrameHeader* header;
@@ -430,5 +420,29 @@ Return startCoroutine(Params params, Allocator const& allocator) {
     return Return(std::move(returned));
 }
 
+// 空指针检查只在 promise 提供 get_return_object_on_allocation_failure 时存在：没有它时
+// Frame::create 以 bad_alloc 报告失败、从不返回空，MSVC 会把这个分支判成不可达（C4702）。
+template <class Return, class Promise, class Params, class Body, class Allocator>
+Return startCoroutineWith(CoroutineFrame<Promise, Params, Body, Allocator>* const frame,
+                          std::true_type) {
+    if (frame == nullptr) return Promise::get_return_object_on_allocation_failure();
+    return runRamp<Return>(*frame);
+}
+
+template <class Return, class Promise, class Params, class Body, class Allocator>
+Return startCoroutineWith(CoroutineFrame<Promise, Params, Body, Allocator>* const frame,
+                          std::false_type) {
+    return runRamp<Return>(*frame);
+}
+
+template <class Return, class Promise, class Body, class Params, class Allocator>
+Return startCoroutine(Params params, Allocator const& allocator) {
+    using Frame = CoroutineFrame<Promise, Params, Body, Allocator>;
+    return startCoroutineWith<Return>(Frame::create(std::move(params), allocator),
+                                      typename Frame::HasFailureObject{});
+}
+
 } // namespace detail
 } // namespace co2
+
+CO2_DETAIL_MSVC_WARNING_POP

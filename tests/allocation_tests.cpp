@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <new>
@@ -174,11 +175,18 @@ void whenAllInsideATaskAllocatesChildFramesStopStateAndAwaiterSlot() {
     CHECK_ALLOCATIONS(5, CHECK(co2::syncWait(awaitsWhenAll()) == 3));
 }
 
+// CallbackAwaitable<int> 的布局：MoveOnlyFunction 4 指针 + 句柄 + 结果 + exception_ptr +
+// 两个原子。libstdc++/libc++ 的 exception_ptr 是 1 个指针，总计正好 8 指针，放得进内联
+// awaiter 槽；MSVC 的 exception_ptr 是 2 个指针，多出的 8 字节让它回落到堆上，每次
+// 回调等待多 1 次分配。
+constexpr bool callbackAwaiterIsInline =
+    co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>();
+static_assert(callbackAwaiterIsInline == (sizeof(std::exception_ptr) == sizeof(void*)),
+              "the callback awaiter is inline exactly when exception_ptr is one pointer");
+constexpr int callbackAwaiterAllocations = callbackAwaiterIsInline ? 0 : 1;
+
 auto viaCallback(int v) CO2_BEG(co2::Task<int>, (v), int got{};) {
-    // 闭包只捕获 this：落在 MoveOnlyFunction 的内联缓冲里，不分配；awaiter 本身也在
-    // 帧的内联 awaiter 槽里。
-    static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>(),
-                  "the callback awaiter must stay within the inline awaiter slot");
+    // 闭包只捕获 this：落在 MoveOnlyFunction 的内联缓冲里，不分配。
     CO2_AWAIT_AS_SET(
         got, co2::CallbackAwaitable<int>,
         co2::fromCallback<int>([this](co2::Continuation<int> done) { done(v); }));
@@ -187,7 +195,8 @@ auto viaCallback(int v) CO2_BEG(co2::Task<int>, (v), int got{};) {
 CO2_END
 
 void callbackAwaiterAllocatesNothingBeyondTheFrame() {
-    CHECK_ALLOCATIONS(1, CHECK(co2::syncWait(viaCallback(6)) == 6));
+    CHECK_ALLOCATIONS(1 + callbackAwaiterAllocations,
+                      CHECK(co2::syncWait(viaCallback(6)) == 6));
 }
 
 auto viaCallbackWithLargeClosure(std::unique_ptr<int> payload, int a, int b)
@@ -206,11 +215,11 @@ auto viaCallbackWithLargeClosure(std::unique_ptr<int> payload, int a, int b)
 CO2_END
 
 void callbackAwaiterKeepsAThreePointerClosureInline() {
-    // 帧 1 次；unique_ptr 的 new int 在计数块之外。
+    // 帧 1 次（MSVC 上再加 awaiter 槽回落）；unique_ptr 的 new int 在计数块之外。
     auto payload = std::unique_ptr<int>{new int{1}};
     CHECK_ALLOCATIONS(
-        1, CHECK(co2::syncWait(viaCallbackWithLargeClosure(std::move(payload), 2, 3)) ==
-                 6));
+        1 + callbackAwaiterAllocations,
+        CHECK(co2::syncWait(viaCallbackWithLargeClosure(std::move(payload), 2, 3)) == 6));
 }
 
 void spawnIsTwoAllocationsBeyondTheFrame() {

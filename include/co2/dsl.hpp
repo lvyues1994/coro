@@ -3,6 +3,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "co2/config.hpp"
 #include "co2/detail/frame.hpp"
 #include "co2/detail/preprocessor.hpp"
 
@@ -53,6 +54,7 @@
                 static_cast<void>(_co2_params);                                        \
             }                                                                          \
             __VA_ARGS__                                                                \
+            CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(4702)                                 \
             ::co2::detail::FrameHeader*                                                \
             operator()(::co2::detail::FrameCore<_co2_promise_type, _co2_capture_pack,  \
                                                 _co2_body>& _co2_context) {            \
@@ -60,6 +62,7 @@
                 case 0U:                                                               \
                     _co2_context.finishInitialSuspend();
 
+// 状态机在 co_return 之后的 break / 收尾语句对编译器而言不可达（C4702），见 config.hpp。
 #define CO2_END                                                                        \
     break;                                                                             \
     default:                                                                           \
@@ -68,6 +71,7 @@
         _co2_context.returnVoidAtEnd();                                                \
         return _co2_context.enterFinalSuspend();                                       \
         }                                                                              \
+        CO2_DETAIL_MSVC_WARNING_POP                                                    \
         }                                                                              \
         ;                                                                              \
         return ::co2::detail::startCoroutine<_co2_return_type, _co2_promise_type,      \

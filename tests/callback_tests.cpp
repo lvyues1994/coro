@@ -18,7 +18,6 @@
 
 #include "co2/callback.hpp"
 #include "co2/coroutine.hpp"
-#include "co2/detail/await_slot.hpp"
 #include "co2/detail/result_storage.hpp"
 #include "co2/manual_executor.hpp"
 #include "co2/scheduler.hpp"
@@ -387,13 +386,12 @@ void initiateReceivesTheCoroutinesToken() {
 }
 
 // ---------------------------------------------------------------------------
-// move-only 闭包：initiate 以 MoveOnlyFunction 保存，捕获 unique_ptr 也能编译；awaiter
-// 仍然放得进帧的内联 awaiter 槽。
+// move-only 闭包：initiate 以 MoveOnlyFunction 保存，捕获 unique_ptr 也能编译。awaiter
+// 是否放得进帧的内联槽取决于 exception_ptr 的大小（1 指针的 libstdc++/libc++ 放得进，
+// 2 指针的 MSVC 放不进），分配次数由 allocation_tests 按平台核对。
 
 auto ownsItsPayload(std::unique_ptr<int> payload)
     CO2_BEG(co2::Task<int>, (payload), int got{};) {
-    static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>(),
-                  "the callback awaiter must stay within the inline awaiter slot");
     CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<int>,
                      co2::fromCallback<int>([p = std::move(payload)](
                                                 co2::Continuation<int> done) mutable {
