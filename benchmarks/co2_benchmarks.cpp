@@ -170,6 +170,25 @@ double taskFailureThroughChain() {
     });
 }
 
+// 已停止沿等待链向上传：最里面一层以已停止结束，根上得到空的 optional。
+auto stopsAtDepth(int depth) CO2_BEG(co2::Task<int>, (depth), int v{};) {
+    if (depth == 0) CO2_AWAIT(co2::just_stopped());
+    CO2_AWAIT_SET(v, stopsAtDepth(depth - 1));
+    CO2_RETURN(v + 1);
+}
+CO2_END
+
+double taskStoppedThroughChain() {
+    constexpr int depth = 100;
+    constexpr int rounds = 50000;
+    return nanosecondsPerOp(static_cast<std::size_t>(depth) * rounds, [&] {
+        long stopped = 0;
+        for (auto round = 0; round != rounds; ++round)
+            if (not co2::syncWait(stopsAtDepth(depth)).has_value()) ++stopped;
+        sink = stopped;
+    });
+}
+
 // 多个线程各自跑一条"等待子 Task"的循环。sharedToken 为真时所有线程的 Task 树共用同一个
 // stop_token——whenAll / spawn 的各个分支落在不同线程上时就是这种形态。
 double awaitChildOnThreads(int const threads, bool const sharedToken) {
@@ -256,6 +275,7 @@ Benchmark const benchmarks[] = {
     {"symmetric Task transfer (with frame allocation)", &symmetricTaskTransfer},
     {"syncWait ready Task", &syncWaitReadyTask},
     {"Task failure through a 100-deep chain, per layer", &taskFailureThroughChain},
+    {"Task stopped through a 100-deep chain, per layer", &taskStoppedThroughChain},
     {"Task await child, 8 threads, own stop_token", &awaitChildOwnToken},
     {"Task await child, 8 threads, shared stop_token", &awaitChildSharedToken},
     {"ManualExecutor hop", &manualExecutorHop},

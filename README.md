@@ -160,10 +160,14 @@ CO2_END
 每一步都是生产者与消费者之间的对称转移，没有同步；消费者在生产者 yield 所在的线程
 上恢复。有 `next()` 未完成时销毁是契约违规。
 
-## 错误：按值向上传
+生产者出错或已停止即流结束：正在等待的那次 `next()` 以同样的结果完成，消费者默认也
+就此结束（想自己处理就写 `co2::asResult(stream.next())`）。那次失败只交付一次，之后的
+`next()` 得到 `false`。
+
+## 错误与已停止：按值向上传
 
 一个 Task 以值、错误或已停止结束。错误是一个 `co2::Error`：要么是一个
-`std::error_code`，要么是一个被捕获的异常。
+`std::error_code`，要么是一个被捕获的异常。已停止表示操作被取消了，没有结果。
 
 ```cpp
 #include <co2/as_result.hpp>
@@ -200,21 +204,41 @@ CO2_END
   特化加 `make_error_code`），之后可以直接传给 `just_error`。
   `CO2_YIELD(co2::with_error(e))` 是 P3552 的拼写，效果相同。
 
+已停止走的是同一条路，只是到了根上不抛异常，而是空的 optional：
+
+```cpp
+#include <co2/unstoppable.hpp>
+
+CO2_AWAIT(co2::stopIfRequested());                    // 取消点：有停止请求才停，否则继续
+CO2_AWAIT(co2::scheduleOn(pool));                     // 也是取消点，见"执行层"
+CO2_AWAIT(co2::just_stopped());                       // 本协程以已停止结束
+CO2_AWAIT(co2::unstoppable(co2::scheduleOn(pool)));   // 对这一次等待隐藏停止请求
+```
+
+- **协程在取消点结束。** 取消是协作式的：停止请求只是一个标志，协程走到取消点才看它。
+  结束的方式与出错相同——其后的语句不执行，局部析构，等待它的协程以已停止结束。
+- **`unstoppable(x)` 用在收尾阶段。** 已经收到停止请求、但还有几步必须做完时，把那几步
+  包起来：被包住的操作（以及它等待的子 Task）看不到停止请求。它只隐藏外面的请求，
+  被包住的操作自己出错或自己停止照样传出来。
+- **组件都遵守同一套规则。** 等待 `JoinHandle`、`whenAll`、`AsyncGenerator` 的 `next()`、
+  `fromCallback`，被等待的一方出错或已停止，等待它的协程就以同样的结果结束；各自的
+  细节见对应的小节。
+
 写 awaiter 与 promise 的人各多一个可选的扩展点：
 
 - awaiter 可以提供 `co2::Completion await_completion() noexcept`，报告这次等待是有值、
   出错还是已停止。恢复点先问它，有值才调用 `await_resume()`。没有这个成员的 awaiter
   行为不变。**包装别的 awaiter 的 awaiter 要把它一并转发**：不转发时，被包住的操作
   出错仍然从 `await_resume()` 抛出（与从前相同），以已停止完成则是契约违规。
+  `scheduleOn` 与 `stopIfRequested()` 例外：它们的 `await_resume()` 照常返回，不转发
+  只是让它们不再是取消点。
 - promise 可以提供 `void return_error(co2::Error) noexcept` 与
   `void return_stopped() noexcept` 接收后两种结果。没有 `return_error()` 时错误在
   协程体内重新抛出，走 `unhandled_exception()`；没有 `return_stopped()` 时"已停止"是
   契约违规。
 
-"已停止"目前只有自己写的 awaiter 能产生；`whenAll`、`JoinHandle`、`AsyncGenerator`、
-`fromCallback` 也还没有接上 `await_completion()`——它们遇到错误仍然从
-`await_resume()` 抛出，结果相同，只是多一次抛接。完整的设计与落地顺序见
-`docs/design/completion-channels.md`。
+完整的设计与落地顺序见 `docs/design/completion-channels.md`。禁用异常的构建
+（`-fno-exceptions`）还没有做，是那份设计的最后一步。
 
 ## 执行层
 
@@ -228,6 +252,11 @@ CO2_AWAIT(co2::scheduleOn(scheduler));   // 转移到 scheduler 上继续
 ```
 
 队列元素就是一个句柄，一次 hop 稳态零分配。
+
+`scheduleOn` 是取消点：协程在目标 scheduler 上恢复时，它的停止令牌上若已有请求，就以
+已停止结束，不再往下执行。检查在 hop 之后，收尾发生在要去的那个线程上。没有停止令牌的
+协程不受影响。收到请求之后还要换线程做收尾，写
+`co2::unstoppable(co2::scheduleOn(s))`。
 
 ### `ThreadPool`
 
@@ -271,8 +300,13 @@ CO2_AWAIT_SET(value, handle);                    // 或在协程里等待（左�
 co2::spawn(pool, work(), parentToken);           // 父 token 的停止请求转发过来
 ```
 
-未完成时析构 `JoinHandle`（与 P3149 `spawn_future` 一致）：请求停止并分离，Task 跑完
-后帧被销毁，结果与异常丢弃。借用它的等待者还挂着时析构是契约违规。
+在协程里等待 `JoinHandle`：被 spawn 的 Task 出错或已停止，等待它的协程以同样的结果
+结束。`join()` 对已停止返回空的 optional，出错时抛出。
+
+未完成时析构 `JoinHandle`（与 P3149 `spawn_future` 一致）：请求停止并分离，Task 结束
+后帧被销毁，结果丢弃。借用它的等待者还挂着时析构是契约违规。注意停止请求是真的：被
+丢弃句柄的 Task 会在它的下一个取消点结束，比如下一次 `scheduleOn`。想让它跑完，就
+保留句柄，或者在 Task 里把那些 hop 写成 `co2::unstoppable(co2::scheduleOn(s))`。
 
 ### `whenAll`
 
@@ -287,9 +321,10 @@ CO2_AWAIT_SET(all, co2::whenAll(std::move(tasks)));          // std::vector<Task
 
 并发启动一组 Task，全部完成后一起交付结果，语义取自 `std::execution::when_all`：非 void
 的结果按参数顺序拼成 tuple（全部 void 则结果是 void），`std::vector<Task<T>>` 给出
-`std::vector<T>`。任一子 Task 失败就向其余子 Task 请求停止，等**全部**完成后重抛时间上
-第一个异常；父的 `stop_token` 转发给每个子 Task。子 Task 在等待者的线程上依次内联启动，
-要并行就让它们各自 `scheduleOn(pool)`。
+`std::vector<T>`。任一子 Task 出错或已停止就向其余子 Task 请求停止，等**全部**结束后：
+有出错的，以时间上第一个错误完成；否则有已停止的，以已停止完成。父的 `stop_token` 转发
+给每个子 Task。子 Task 在等待者的线程上依次内联启动，要并行就让它们各自
+`scheduleOn(pool)`。
 
 ### `fromCallback`
 
@@ -307,10 +342,23 @@ CO2_END
 ```
 
 把回调式异步 API 变成 awaiter：`initiate(continuation)` 或
-`initiate(continuation, stop_token)` 发起操作，API 完成时调用 `continuation(args...)`
-（就地构造结果）或 `continuation.setException(error)`，**恰好一次**。协程在回调所在的
-线程上恢复；回调在 `initiate` 返回之前就到达时不挂起。状态全部在 awaiter 里，通常没有
-堆分配。表达式里有 lambda，所以用 `CO2_AWAIT_AS` 显式给出 awaitable 类型。
+`initiate(continuation, stop_token)` 发起操作，API 完成时调用续体的四个出口之一，
+**恰好一次**：
+
+```cpp
+done(args...);              // 有值：就地构造结果
+done.setError(code);        // 出错：一个 std::error_code
+done.setException(error);   // 出错：一个捕获的异常
+done.setStopped();          // 已停止：操作被取消了
+```
+
+后三种让等待它的协程以同样的结果结束。要支持取消，就在 `initiate` 里用收到的
+`stop_token` 注册一个 `stop_callback` 去调 API 自己的 cancel，API 随后以"已取消"回调，
+在那个回调里调用 `done.setStopped()`。
+
+协程在回调所在的线程上恢复；回调在 `initiate` 返回之前就到达时不挂起。状态全部在
+awaiter 里，通常没有堆分配。表达式里有 lambda，所以用 `CO2_AWAIT_AS` 显式给出
+awaitable 类型。
 
 ## 取消：`stop_token`
 
@@ -321,12 +369,29 @@ CO2_END
 token 沿 Task 树传播：`syncWait`/`spawn` 提供根 token，子 Task 从父 promise 继承
 （等待者的 `await_suspend` 收到带类型的父句柄，与 `std::execution::task` 查询父环境
 的方式相同）。`AsyncGenerator` 的生产者同样在这条链上：每次 `next()` 使用发起它的
-消费者的 token。体内读取：
+消费者的 token。
+
+取消是协作式的：协程在取消点结束（见"错误与已停止"），通常不需要自己读令牌：
 
 ```cpp
-auto loop(co2::ThreadPool& pool) CO2_BEG(co2::Task<>, (pool), co2::stop_token token;) {
+auto loop(co2::ThreadPool& pool) CO2_BEG(co2::Task<>, (pool)) {
+    for (;;) {
+        CO2_AWAIT(co2::scheduleOn(pool));   // 取消点：收到停止请求之后在这里结束
+        step();
+    }
+}
+CO2_END
+```
+
+想自己决定什么时候停、停之前做什么，照旧在体内读令牌。这时循环里的 hop 要用
+`unstoppable` 包住，否则协程会先在 hop 那里结束，走不到自己的判断：
+
+```cpp
+auto loop(co2::ThreadPool& pool) CO2_BEG(co2::Task<int>, (pool), co2::stop_token token;) {
     CO2_AWAIT_SET(token, co2::getStopToken());
-    while (not token.stop_requested()) CO2_AWAIT(co2::scheduleOn(pool));
+    while (not token.stop_requested())
+        CO2_AWAIT(co2::unstoppable(co2::scheduleOn(pool)));
+    CO2_RETURN(flush());   // 正常返回一个值
 }
 CO2_END
 ```
@@ -353,7 +418,7 @@ co2::setContractViolationHandler([](co2::ContractViolation const& v) {
 | `co2/dsl.hpp` | `CO2_*` 宏 |
 | `co2/task.hpp` / `generator.hpp` / `async_generator.hpp` | 返回类型 |
 | `co2/error.hpp` / `completion.hpp` / `result.hpp` / `optional.hpp` | `Error`、`Completion`、`Result<T>` 与 `Unit`、`optional<T>` |
-| `co2/just.hpp` / `as_result.hpp` | `just_error` / `with_error`、`asResult` |
+| `co2/just.hpp` / `as_result.hpp` / `unstoppable.hpp` | `just_error` / `with_error` / `just_stopped` / `stopIfRequested`、`asResult`、`unstoppable` |
 | `co2/scheduler.hpp` / `manual_executor.hpp` / `thread_pool.hpp` | 执行层 |
 | `co2/sync_wait.hpp` / `spawn.hpp` | 根适配器 |
 | `co2/when_all.hpp` / `callback.hpp` | 组合器 `whenAll`、回调适配 `fromCallback` |
@@ -382,16 +447,19 @@ i7-13700KF，每项 7 轮取中位数：
 | elements_of 深度 8 yield/next | 1.9 |
 | symmetric Task transfer（含帧分配） | 12.0 |
 | syncWait ready Task | 26.7 |
-| Task 链上的失败，100 层，每层 | 45.3 |
+| Task 链上的失败，100 层，每层 | 44.4 |
+| Task 链上的已停止，100 层，每层 | 20.3 |
 | Task 等待子 Task，8 线程各自的 stop_token | 19.3 |
 | Task 等待子 Task，8 线程共享一个 stop_token | 18.2 |
-| ManualExecutor hop | 20.1 |
-| ThreadPool hop（1 worker，1 Task） | 13.1 |
-| ThreadPool hop（4 workers，32 Task 聚合） | 3.5 |
-| ThreadPool hop（8 workers，1 Task，不饱和） | 14.5 |
+| ManualExecutor hop | 22.3 |
+| ThreadPool hop（1 worker，1 Task） | 13.4 |
+| ThreadPool hop（4 workers，32 Task 聚合） | 3.6 |
+| ThreadPool hop（8 workers，1 Task，不饱和） | 15.5 |
 | spawn + join（跨线程唤醒） | 2542 |
 
 "Task 链上的失败"在错误改为按值传播之前是 558：那时每一层都要重抛一次异常。
+`scheduleOn` 成为取消点之后，每次 hop 多读一次停止状态：`ManualExecutor hop` 从 20.1
+变为 22.3，线程池的三项分别从 13.1、3.5、14.5 变为 13.4、3.6、15.5。
 
 线程池的几项对机器负载敏感：同一台机器上有其他负载时，不饱和那一项在 17～30 ns 之间
 浮动。数字只在同一台机器、同一份编译选项下可比。

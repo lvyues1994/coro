@@ -133,7 +133,8 @@ promise 不受影响。
   `active`，内层 `final_suspend` 把 `active` 改回父层并对称转移过去。嵌套生成器由父层
   帧里的 awaiter 拥有。yield 的 prvalue 移进帧保存（D11），左值引用只记地址。
 - **`AsyncGenerator<T>`**：`next()` 记下消费者并转移进生产者；`yield_value` /
-  `final_suspend` 转移回消费者。任一时刻只有一方运行，没有同步。
+  `final_suspend` 转移回消费者。任一时刻只有一方运行，没有同步。生产者出错或已停止时，
+  结果记在 promise 上，由正在等待的那次 `next()` 的 `await_completion()` 取走一次。
 
 ## 环境与取消
 
@@ -144,6 +145,11 @@ promise（自定义根）与类型擦除的句柄给出 `stop_possible()` 为假
 `TaskPromise::await_transform(GetStopToken)` 读取（其余 awaitable 由泛型重载原样转发）。
 `AsyncGeneratorPromise` 以同样的方式参与：`next()` 的 awaiter 在 `await_suspend` 里把
 消费者的 token 交给生产者，生产者体内与它等待的子 Task 看到的都是这一份。
+
+取消点（`docs/design/completion-channels.md`）：停止请求只是令牌上的一个标志，协程走到
+取消点才以已停止结束——`stopIfRequested()`、`scheduleOn`，以及任何以已停止完成的操作
+（`fromCallback` 的 `setStopped()`、被取消的子 Task、`whenAll`）。`unstoppable(x)` 把
+类型擦除的句柄交给 x 的 `await_suspend`，x 于是查不到等待者的环境，看不到停止请求。
 
 继承是**借用**而不是拷贝。promise 里存的是 `detail::EnvStopToken`（一个指针宽）：根 Task
 持有一份引用；被等待的子协程只记下等待者的停止状态，不碰引用计数——等待者在子协程
@@ -162,6 +168,9 @@ token 的基准：240 → 20 ns/await）。等待者不是 co2 自己的 promise
 
 - **`Scheduler::schedule(coroutine_handle<>) noexcept`**：队列元素就是句柄，一次 hop
   稳态零分配。协程在完成它的线程上被内联恢复；换线程显式 `scheduleOn(s)`。
+  `scheduleOn` 是取消点：awaiter 在调用 `schedule()` **之前**借下等待者的停止令牌
+  （之后协程可能已经在别的线程上恢复，不能再写 awaiter），恢复时令牌上有请求就以
+  已停止完成——与 `std::execution` 的 `run_loop` 在轮到一项工作时检查停止请求相同。
 - **`ThreadPool`**：每线程一个固定容量（1024）的本地 FIFO 队列（owner 尾部 push，
   owner/thief 头部 CAS 认领——单生产者多消费者环）+ 互斥全局队列（外部提交、本地溢出）。
   找活 本地 → 全局 → 随机起点窃取（一次搬走受害者队列的一半；只剩一项且主人在自己
