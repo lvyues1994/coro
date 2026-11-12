@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -16,6 +17,7 @@
 
 #include "co2/coroutine.hpp"
 #include "co2/scheduler.hpp"
+#include "co2/spawn.hpp"
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
 #include "co2/thread_pool.hpp"
@@ -289,9 +291,174 @@ void manyConcurrentHoppersFinishWithoutLosingWakeups() {
     CHECK(not ids.contains(std::this_thread::get_id()));
 }
 
+// ---------------------------------------------------------------------------
+// 本地队列：批量窃取
+
+void* itemAt(std::size_t const index) {
+    static int cells[64];
+    return &cells[index];
+}
+
+void stealingMovesHalfOfTheVictimsQueueInOrder() {
+    using co2::detail::LocalQueue;
+    auto const victim = std::unique_ptr<LocalQueue>{new LocalQueue{}};
+    auto const thief = std::unique_ptr<LocalQueue>{new LocalQueue{}};
+
+    CHECK(victim->stealInto(*thief).status == LocalQueue::TakeStatus::Empty);
+
+    for (auto index = std::size_t{}; index != 10U; ++index)
+        CHECK(victim->push(itemAt(index)));
+    CHECK(victim->snapshot().size == 10);
+
+    // 取走一半（向上取整）：最老的一项交给调用方立刻运行，其余按原顺序进窃取者的队列。
+    auto const stolen = victim->stealInto(*thief);
+    CHECK(stolen.status == LocalQueue::TakeStatus::Taken);
+    CHECK(stolen.item == itemAt(0U));
+    CHECK(thief->snapshot().size == 4);
+    CHECK(victim->snapshot().size == 5);
+    for (auto index = std::size_t{1}; index != 5U; ++index)
+        CHECK(thief->take().item == itemAt(index));
+    for (auto index = std::size_t{5}; index != 10U; ++index)
+        CHECK(victim->take().item == itemAt(index));
+    CHECK(thief->looksEmpty() && victim->looksEmpty());
+
+    // 只有一项时就取那一项，窃取者的队列不变。
+    CHECK(victim->push(itemAt(20U)));
+    auto const single = victim->stealInto(*thief);
+    CHECK(single.status == LocalQueue::TakeStatus::Taken && single.item == itemAt(20U));
+    CHECK(thief->looksEmpty() && victim->looksEmpty());
+
+    // 队首位置随每次取走单调前进：窃取者靠它判断"主人是否在自己消化队列"。
+    CHECK(victim->snapshot().head == 11);
+}
+
+// ---------------------------------------------------------------------------
+// 活性：新的工作必须让足够多的工作线程醒着。
+
+// `parties` 个参与者都到达之后才一起放行。
+struct Barrier {
+    explicit Barrier(int const parties_) : parties{parties_} {}
+
+    void arriveAndWait() {
+        std::unique_lock<std::mutex> lock{mutex};
+        ++arrived;
+        changed.notify_all();
+        changed.wait(lock, [this] { return arrived >= parties; });
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    int parties;
+    int arrived{};
+};
+
+auto barrierJob(co2::ThreadPool& pool, Barrier& barrier, Completion& completion)
+    CO2_BEG(Detached, (pool, barrier, completion)) {
+    CO2_AWAIT(co2::scheduleOn(pool));
+    barrier.arriveAndWait();
+    completion.signal();
+}
+CO2_END
+
+void spinFor(std::chrono::nanoseconds const duration) {
+    auto const until = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < until) {
+    }
+}
+
+// 每一轮新建一个线程池，等 `delay` 之后才让 `submit` 提交工作。delay 从 0 扫到 100 微秒：
+// 刚启动的工作线程先自旋找活、找不到再停车，扫描让提交落在这个过渡期的各个位置上——
+// 丢唤醒的窗口就在"最后一个搜索者正要去停车"的那几十纳秒里，固定的时序碰不到它。
+template <class Submit> void sweepSubmissionTiming(Submit submit) {
+    constexpr int workers = 4;
+    constexpr int sweeps = 6;
+    constexpr int steps = 200;
+    for (auto round = 0; round != sweeps * steps; ++round) {
+        co2::ThreadPool pool{static_cast<unsigned>(workers)};
+        Barrier barrier{workers};
+        Completion completion;
+        spinFor(std::chrono::nanoseconds{(round % steps) * 500});
+        submit(pool, barrier, completion, workers);
+        completion.waitFor(workers);
+    }
+}
+
+// 外部一口气提交 N 个会阻塞的作业：只有 N 个工作线程同时各持一个，才能全部放行。提交方
+// 看到"已经有线程在找活"就不再唤醒，后续的线程要靠"找到活的最后一个搜索者再叫醒一个"
+// 这条链逐个醒来；链断了，这个用例就永远等不到。
+void everyWorkerIsRecruitedForInjectedWork() {
+    sweepSubmissionTiming([](co2::ThreadPool& pool, Barrier& barrier,
+                             Completion& completion, int const workers) {
+        for (auto index = 0; index != workers; ++index)
+            barrierJob(pool, barrier, completion);
+    });
+}
+
+// 同上，但分两批：先到的一批把一部分线程叫醒并占住，第二批落在"有的线程在跑、最后一个
+// 搜索者正要去停车"的状态上。第一批的大小与两批的间隔都在扫描。
+void everyWorkerIsRecruitedForWorkArrivingInTwoBursts() {
+    auto round = 0;
+    sweepSubmissionTiming([&round](co2::ThreadPool& pool, Barrier& barrier,
+                                   Completion& completion, int const workers) {
+        auto const firstBurst = 1 + round % (workers - 1);
+        auto const gap = std::chrono::nanoseconds{(round / (workers - 1) % 100) * 1000};
+        ++round;
+        for (auto index = 0; index != firstBurst; ++index)
+            barrierJob(pool, barrier, completion);
+        spinFor(gap);
+        for (auto index = firstBurst; index != workers; ++index)
+            barrierJob(pool, barrier, completion);
+    });
+}
+
+auto launchesBarrierJobs(co2::ThreadPool& pool, Barrier& barrier, Completion& completion,
+                         int count)
+    CO2_BEG(Detached, (pool, barrier, completion, count), int index{};) {
+    CO2_AWAIT(co2::scheduleOn(pool));
+    for (index = 0; index < count; ++index)
+        barrierJob(pool, barrier, completion);
+    // 发起者自己也是一个参与者：它占着这个工作线程不放，排在它本地队列里的作业只能
+    // 靠别的工作线程偷走。
+    barrier.arriveAndWait();
+    completion.signal();
+}
+CO2_END
+
+void everyWorkerIsRecruitedForLocallyQueuedWork() {
+    sweepSubmissionTiming([](co2::ThreadPool& pool, Barrier& barrier,
+                             Completion& completion, int const workers) {
+        launchesBarrierJobs(pool, barrier, completion, workers - 1);
+    });
+}
+
+auto doubles(co2::ThreadPool& pool, int v) CO2_BEG(co2::Task<int>, (pool, v)) {
+    CO2_AWAIT(co2::scheduleOn(pool));
+    CO2_RETURN(v * 2);
+}
+CO2_END
+
+auto blocksOnItsChild(co2::ThreadPool& pool, int v) CO2_BEG(co2::Task<int>, (pool, v)) {
+    CO2_AWAIT(co2::scheduleOn(pool));
+    // 在工作线程上阻塞式 join：子 Task 排在本线程的本地队列里，只剩它一项，而本线程
+    // 不会回来取——必须有另一个工作线程被叫醒并把它偷走。
+    CO2_RETURN(co2::spawn(pool, doubles(pool, v)).join());
+}
+CO2_END
+
+void aWorkerBlockedOnItsOwnQueuedWorkIsRescuedByAnother() {
+    co2::ThreadPool pool{2U};
+    for (auto round = 0; round != 200; ++round)
+        CHECK(co2::spawn(pool, blocksOnItsChild(pool, round)).join() == round * 2);
+}
+
 } // namespace
 
 int main() {
+    stealingMovesHalfOfTheVictimsQueueInOrder();
+    everyWorkerIsRecruitedForInjectedWork();
+    everyWorkerIsRecruitedForWorkArrivingInTwoBursts();
+    everyWorkerIsRecruitedForLocallyQueuedWork();
+    aWorkerBlockedOnItsOwnQueuedWorkIsRescuedByAnother();
     scheduleOnMovesTheCoroutineToAWorkerThread();
     exceptionsFromWorkersReachSyncWait();
     injectedWorkIsSpreadAcrossWorkers();

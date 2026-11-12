@@ -164,8 +164,8 @@ CO2_AWAIT(co2::scheduleOn(scheduler));   // 转移到 scheduler 上继续
 
 工作窃取线程池：每线程一个固定容量的本地 FIFO 队列 + 互斥全局队列；本地 → 全局 →
 随机窃取；工作线程上的 `scheduleOn(pool)` 是真正的让步（排在前面的本地工作先跑）。
-停车/唤醒用 Dekker 式栅栏协议，满载热路径没有共享原子 RMW、不拿锁。析构排空所有
-队列后 join。
+窃取一次搬走受害者队列的一半。唤醒是节流的：已经有线程在找活时，新提交的工作不再
+叫醒别人；找活的线程停车前先自旋一小段。满载热路径不拿锁。析构排空所有队列后 join。
 
 ```cpp
 co2::ThreadPool pool{4};                    // 默认 hardware_concurrency()
