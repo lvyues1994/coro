@@ -514,6 +514,32 @@ void destroyingAGeneratorMidIterationDestroysEveryActiveFrame() {
     CHECK(counters.alive() == 0);
 }
 
+auto deepHoldsLocal(Counters& counters, int depth)
+    CO2_BEG(co2::Generator<int>, (counters, depth),
+            co2::detail::ResultStorage<Tracked> local;) {
+    local.emplace(counters, depth);
+    if (depth == 0) {
+        CO2_YIELD(0);
+    } else {
+        CO2_YIELD(co2::elements_of(deepHoldsLocal(counters, depth - 1)));
+    }
+}
+CO2_END
+
+void destroyingADeeplyNestedGeneratorMidIterationDoesNotRecurse() {
+    // 销毁根时最内层正停在 yield 上，整条活动链都还活着。逐层递归销毁每层要占好几个
+    // 本机栈帧，十万层在未优化构建下必然溢出；销毁必须从最内层往外迭代。
+    constexpr int depth = 100000;
+    Counters counters;
+    {
+        auto generator = deepHoldsLocal(counters, depth);
+        auto it = generator.begin();
+        CHECK(*it == 0);
+        CHECK(counters.alive() == depth + 1);
+    }
+    CHECK(counters.alive() == 0);
+}
+
 void generatorsAreMovable() {
     auto first = counting(2);
     co2::Generator<int> second;
@@ -687,6 +713,7 @@ int main() {
     lvalueGeneratorsAreTreatedAsRanges();
     nestedExceptionsPropagateThroughTheParentToTheConsumer();
     destroyingAGeneratorMidIterationDestroysEveryActiveFrame();
+    destroyingADeeplyNestedGeneratorMidIterationDoesNotRecurse();
     generatorsAreMovable();
 
     asyncGeneratorYieldsSynchronously();

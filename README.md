@@ -122,7 +122,8 @@ for (auto value : tree(3)) use(value);
 
 `Generator<T>` 的 `reference` 是 `T&&`（可以移走元素）；`Generator<T const&>` yield 左值
 不复制；`Generator<Ref, V>` 显式 value type。内层逃出的异常在父层的 `elements_of`
-处重抛，最终由 `begin()`/`++` 抛给消费者。中途销毁生成器会沿链销毁所有活动帧。
+处重抛，最终由 `begin()`/`++` 抛给消费者。中途销毁生成器会沿链销毁所有活动帧
+（从最内层往外迭代，栈深同样不随深度增长）。
 
 ### `AsyncGenerator<T>`
 

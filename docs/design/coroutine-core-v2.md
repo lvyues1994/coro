@@ -736,9 +736,10 @@ SFINAE 二选一，`T`/`void` 只有一份 promise（`ResultStorage<T>`）。
 - **异常**：内层的异常存在内层 promise，`final_suspend` 转移回父层后在父层的
   `elements_of` 表达式处重新抛出（父层可捕获——但受 D1 限制不能把挂起点放进 `try`，
   所以实际上会继续上抛），未捕获时逐层到根，由 `begin()`/`++` 抛给消费者。
-- **所有权**：嵌套生成器由父层帧里的 awaiter 拥有；销毁根即沿链销毁全部活动帧
-  （递归深度 = 嵌套深度，与 std 相同）。中途销毁不是契约违规——生成器体内没有外部
-  操作。
+- **所有权**：嵌套生成器由父层帧里的 awaiter 拥有；销毁根即沿链销毁全部活动帧。
+  销毁是迭代的：根从最内层的活动协程（`root->active`）往外逐层 `destroy()`，并经子
+  promise 里的 `owner` 指针把父层 awaiter 的句柄置空，本机栈深不随嵌套深度增长（测试：
+  十万层中途销毁）。中途销毁不是契约违规——生成器体内没有外部操作。
 - **C++14 的 range-for**：`begin()`/`end()` 必须同型，`end()` 返回哨兵迭代器；同时提供
   `co2::default_sentinel_t` 比较。
 - 未做：`std::generator` 的 `Allocator` 模板参数（帧分配走 `CO2_BEG_WITH_ALLOCATOR`）。

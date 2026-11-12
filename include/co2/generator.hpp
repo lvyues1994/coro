@@ -158,6 +158,8 @@ template <class Ref, class V> struct GeneratorPromise {
             auto& childPromise = child.promise();
             childPromise.root = parentPromise.root;
             childPromise.parent = parent;
+            // awaiter 已经在父层帧的槽里，地址稳定：根被中途销毁时靠它摘掉这份所有权。
+            childPromise.owner = &nested;
             parentPromise.root->active = child;
             return child;
         }
@@ -185,6 +187,7 @@ template <class Ref, class V> struct GeneratorPromise {
     Handle active;
     GeneratorPromise* root{this};
     Handle parent;
+    Generator<Ref, V>* owner{}; // 嵌套时：父层 awaiter 里拥有本帧的那个 Generator
     std::exception_ptr error;
     ResultStorage<Stored> stored;
 
@@ -319,9 +322,27 @@ template <class Ref, class V> struct Generator {
 
     void reset() noexcept {
         if (not handle) return;
+        destroyNested();
         handle.destroy();
         handle = nullptr;
         started = false;
+    }
+
+    // 嵌套生成器由父层帧里的 awaiter 拥有：直接销毁根会逐层递归（根帧 → awaiter → 子帧
+    // → ……），本机栈深随嵌套深度增长。中途销毁根时先从最内层的活动协程往外逐层销毁，
+    // 并把父层 awaiter 里的句柄置空；轮到父层帧销毁时，它的 awaiter 已经不拥有任何东西。
+    void destroyNested() noexcept {
+        auto& promise = handle.promise();
+        // 未启动的没有内层；自己是别人内层的只会在跑完之后被销毁，那时也没有内层。
+        if (not started || promise.root != &promise) return;
+        auto innermost = promise.active;
+        while (innermost != handle) {
+            auto& inner = innermost.promise();
+            auto const parent = inner.parent;
+            inner.owner->handle = nullptr;
+            innermost.destroy();
+            innermost = parent;
+        }
     }
 
     coroutine_handle<promise_type> handle;
