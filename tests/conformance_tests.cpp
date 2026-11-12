@@ -520,6 +520,33 @@ void notSuspendingAtFinalSuspendDestroysTheCoroutineState() {
                   "param destroyed");
 }
 
+// co_await promise.final_suspend() 是完整的 await 表达式：不挂起（await_ready 为真，或
+// await_suspend 返回 false）时也要求值 await_resume，然后协程状态才销毁。
+
+auto detached(EventLog& log, bool finalReady) CO2_BEG(T::Detached, (log, finalReady)) {
+    log.add("body");
+    CO2_RETURN();
+}
+CO2_END
+
+void finalAwaiterIsResumedWhenFinalSuspendDoesNotSuspend() {
+    {
+        EventLog log;
+        detached(log, true);
+        EXPECT_EVENTS(log, "body", "return_void", "final_suspend",
+                      "final_suspend await_ready", "final_suspend await_resume",
+                      "promise destroyed");
+    }
+    {
+        EventLog log;
+        detached(log, false);
+        EXPECT_EVENTS(log, "body", "return_void", "final_suspend",
+                      "final_suspend await_ready",
+                      "final_suspend await_suspend -> false",
+                      "final_suspend await_resume", "promise destroyed");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // destroy() 挂起中的协程：awaiter → 局部 → promise → 参数副本
 
@@ -733,6 +760,7 @@ int main() {
     awaitTransformAppliesToCoAwaitOnly();
     operatorCoAwaitIsLookedUpAsMemberThenAdl();
     notSuspendingAtFinalSuspendDestroysTheCoroutineState();
+    finalAwaiterIsResumedWhenFinalSuspendDoesNotSuspend();
     destroyingASuspendedCoroutineRunsDestructorsInStandardOrder();
     handleRoundTripsThroughPromiseAndAddress();
     promiseOperatorNewAndAllocationFailureAreHonored();

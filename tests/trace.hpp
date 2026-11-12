@@ -357,6 +357,48 @@ template <class Lib> struct Types {
             void unhandled_exception() { log->add("unhandled_exception"); }
         };
     };
+
+    // final_suspend 不挂起的两种方式：await_ready 为真，或 await_suspend 返回 false。
+    // co_await promise.final_suspend() 是完整的 await 表达式，两种情况下都要求值
+    // await_resume，之后协程状态才销毁。
+    struct Detached {
+        struct promise_type {
+            EventLog* log{};
+            bool finalReady{};
+
+            template <class... Rest>
+            promise_type(EventLog& log_, bool const finalReady_, Rest&...)
+                : log{&log_}, finalReady{finalReady_} {}
+            promise_type() = default;
+            ~promise_type() {
+                if (log != nullptr) log->add("promise destroyed");
+            }
+
+            struct FinalAwaiter {
+                promise_type* promise;
+                bool await_ready() const noexcept {
+                    promise->log->add("final_suspend await_ready");
+                    return promise->finalReady;
+                }
+                bool await_suspend(Handle<>) const noexcept {
+                    promise->log->add("final_suspend await_suspend -> false");
+                    return false;
+                }
+                void await_resume() const noexcept {
+                    promise->log->add("final_suspend await_resume");
+                }
+            };
+
+            Detached get_return_object() { return {}; }
+            typename Lib::SuspendNever initial_suspend() { return {}; }
+            FinalAwaiter final_suspend() noexcept {
+                log->add("final_suspend");
+                return FinalAwaiter{this};
+            }
+            void return_void() { log->add("return_void"); }
+            void unhandled_exception() { log->add("unhandled_exception"); }
+        };
+    };
 };
 
 template <class Lib>

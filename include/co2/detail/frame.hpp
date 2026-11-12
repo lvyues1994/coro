@@ -106,12 +106,14 @@ template <class Promise, class Params, class Body> struct FrameCore {
     }
 
     // co_await promise.final_suspend()。挂起时 done 置真、帧保留到 owner destroy()；
-    // 不挂起时控制流掉出协程末尾，协程状态被销毁，返回后不得再访问帧。
+    // 不挂起（await_ready 为真，或 await_suspend 返回 false）时与任何 await 表达式一样
+    // 先求值 await_resume()，然后控制流掉出协程末尾，协程状态被销毁，返回后不得再访问帧。
     FrameHeader* enterFinalSuspend() noexcept {
         destroyBody();
         auto& awaiter =
             slot.template emplace<FinalAwaiter>(getAwaiter(promise().final_suspend()));
         if (awaiter.await_ready()) {
+            awaiter.await_resume();
             destroySelf();
             return nullptr;
         }
@@ -120,6 +122,8 @@ template <class Promise, class Params, class Body> struct FrameCore {
         auto const outcome = suspendWith(awaiter, handle());
         if (not outcome.suspended) {
             prefix.header.done = false;
+            markRunning();
+            awaiter.await_resume();
             destroySelf();
             return nullptr;
         }

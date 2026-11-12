@@ -317,6 +317,29 @@ S::StartThrowsTask stdStartThrows(EventLog& log, [[maybe_unused]] bool lazy) {
     co_return;
 }
 
+// ---------------------------------------------------------------------------
+// 场景 9：final_suspend 不挂起（await_ready 为真 / await_suspend 返回 false）时仍然
+// 求值 final awaiter 的 await_resume
+
+auto co2Detached(EventLog& log, bool finalReady)
+    CO2_BEG(C::Detached, (log, finalReady)) {
+    log.add("body");
+    CO2_RETURN();
+}
+CO2_END
+
+S::Detached stdDetached(EventLog& log, [[maybe_unused]] bool finalReady) {
+    log.add("body");
+    co_return;
+}
+
+template <class Make> EventLog runDetached(Make make, bool const finalReady) {
+    EventLog log;
+    make(log, finalReady);
+    log.add("-- returned");
+    return log;
+}
+
 template <class Task, class Make> EventLog runStartThrows(Make make, bool const lazy) {
     EventLog log;
     {
@@ -367,4 +390,8 @@ int main() {
     compare("initial await_resume throws (eager)",
             runStartThrows<C::StartThrowsTask>(co2StartThrows, false),
             runStartThrows<S::StartThrowsTask>(stdStartThrows, false));
+    compare("final_suspend does not suspend (await_ready)",
+            runDetached(co2Detached, true), runDetached(stdDetached, true));
+    compare("final_suspend does not suspend (await_suspend -> false)",
+            runDetached(co2Detached, false), runDetached(stdDetached, false));
 }

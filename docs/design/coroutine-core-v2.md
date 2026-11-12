@@ -348,7 +348,8 @@ static FrameHeader* step(FrameHeader* header) {
 
 `enterFinalSuspend()` 等待 `final_suspend()`：挂起时置 `done = true`，帧保留到 owner
 `destroy()`（`Task`、`Generator` 都靠这一点在完成后读取 promise 里的结果）；
-`await_ready` 为真或 `await_suspend` 返回 `false` 时**控制流掉出协程末尾，协程状态被
+`await_ready` 为真或 `await_suspend` 返回 `false` 时先求值 final awaiter 的
+`await_resume()`（它是完整的 await 表达式），然后**控制流掉出协程末尾，协程状态被
 自动销毁**（局部、promise、参数副本析构，帧释放），此后任何句柄都是悬空的——这正是
 标准对 `suspend_never` 式 final suspend 的规定，也是自销毁的 fire-and-forget 协程的
 实现方式；返回句柄时对称转移。`final_suspend()` 是 `noexcept`，这里不需要 catch。
