@@ -253,18 +253,44 @@ void exceptionsBeforeTheInitialAwaitResumePropagateToTheCaller() {
         CHECK(propagated);
         checkDestroyedWithoutRunning(log);
     }
-    // 第一次 resume() 阶段：initial awaiter 的 await_resume 抛出，同样销毁协程状态。
+}
+
+// initial awaiter 的 await_resume 抛出不属于"初始挂起点之前"：标准在求值 await-resume
+// 之前就把 initial-await-resume-called 置真（[dcl.fct.def.coroutine]/5），所以异常进入
+// unhandled_exception，协程走到 final suspend，帧仍由拥有者销毁。
+
+auto startThrows(EventLog& log, bool lazy) CO2_BEG(T::StartThrowsTask, (log, lazy)) {
+    log.add("body");
+    CO2_RETURN();
+}
+CO2_END
+
+void initialAwaitResumeExceptionsReachUnhandledException() {
+    // 惰性：第一次 resume() 时抛出。resume() 正常返回，协程停在 final suspend point。
     {
         EventLog log;
-        auto task = throwsBeforeInitialResume(log, 3, Tracked{log, "param"});
-        auto propagated = false;
-        try {
-            task.handle.resume();
-        } catch (std::runtime_error const&) {
-            propagated = true;
+        {
+            auto task = startThrows(log, true);
+            task.resume();
+            CHECK(task.done());
+            CHECK(task.promise().error != nullptr);
+            EXPECT_EVENTS(log, "promise(params)", "get_return_object", "initial_suspend",
+                          "initial_suspend await_resume throws", "unhandled_exception",
+                          "final_suspend", "final_suspend await_ready",
+                          "final_suspend await_suspend");
         }
-        CHECK(propagated);
-        checkDestroyedWithoutRunning(log);
+        CHECK(log.events.back() == "promise destroyed"); // 拥有者销毁，恰好一次
+    }
+    // 不挂起：await_resume 在 ramp 里抛出，同样不抛给调用方。
+    {
+        EventLog log;
+        auto task = startThrows(log, false);
+        CHECK(task.done());
+        CHECK(task.promise().error != nullptr);
+        EXPECT_EVENTS(log, "promise(params)", "get_return_object", "initial_suspend",
+                      "initial_suspend await_resume throws", "unhandled_exception",
+                      "final_suspend", "final_suspend await_ready",
+                      "final_suspend await_suspend");
     }
 }
 
@@ -696,6 +722,7 @@ int main() {
     localsAreDestroyedBeforeUnhandledException();
     rethrowingUnhandledExceptionLeavesTheCoroutineAtFinalSuspend();
     exceptionsBeforeTheInitialAwaitResumePropagateToTheCaller();
+    initialAwaitResumeExceptionsReachUnhandledException();
     awaitSuspendReturningVoidSuspends();
     readyAwaiterNeverSuspends();
     awaitSuspendReturningFalseResumesImmediately();

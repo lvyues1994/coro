@@ -27,6 +27,10 @@ CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(4702)
 // 帧是一次分配的标准布局对象：{ header, promise } 前缀、参数副本（Params）、局部与
 // 程序计数器（Body）、awaiter 槽、allocator。构造顺序 参数副本 → promise → 局部，
 // 销毁顺序 awaiter → 局部 → promise → 参数副本，与标准一致。核心不含任何同步。
+//
+// 变换里的 try 块分在两处：initial-await-resume-called 为假的那一段（promise 构造到
+// initial awaiter 的 await_suspend）在 ramp（runRamp）里，异常销毁帧并抛给调用方；为真
+// 的那一段（initial awaiter 的 await_resume 起）在 step 里，异常进入 unhandled_exception。
 
 namespace co2 {
 namespace detail {
@@ -44,7 +48,6 @@ template <class Promise, class Params, class Body> struct FrameCore {
     alignas(Body) unsigned char bodyStorage[sizeof(Body)];
     AwaitSlot<> slot;
     unsigned suspendPoint;
-    bool initialAwaitResumed;
     // 局部（Body）在离开协程体作用域时就销毁——co_return、掉出末尾或异常逃出——
     // 早于 final_suspend，与标准一致；destroy() 只销毁仍然存活的那一份。
     bool bodyAlive;
@@ -81,12 +84,14 @@ template <class Promise, class Params, class Body> struct FrameCore {
     void markSuspended() noexcept { prefix.header.running = false; }
     void markRunning() noexcept { prefix.header.running = true; }
 
-    // 初始挂起点之后的第一条语句：initial awaiter 的 await_resume()。它抛出时仍属于
-    // "初始挂起点之前"，step 会销毁帧并把异常抛给恢复方。
+    // 初始挂起点之后的第一条语句：initial awaiter 的 await_resume()。标准在求值它之前
+    // 就把 initial-await-resume-called 置真（[dcl.fct.def.coroutine]/5），所以它抛出的
+    // 异常与协程体里的异常一样进入 unhandled_exception，帧仍由拥有者销毁。"初始挂起点
+    // 之前"的异常（get_return_object、initial_suspend、await_ready、await_suspend）全部
+    // 发生在 ramp 里，由 runRamp 销毁帧并抛给调用方。
     void finishInitialSuspend() {
         awaiter<InitialAwaiter>().await_resume();
         resetAwaiter();
-        initialAwaitResumed = true;
     }
 
     // 掉出协程末尾：有 return_void 就调用它；没有时标准是未定义行为，这里报告契约违规。
@@ -256,7 +261,6 @@ struct CoroutineFrame {
             FrameAllocator{frameAllocator};
         frame->core.prefix.header = FrameHeader{&destroy, &step, false, false};
         frame->core.suspendPoint = 0U;
-        frame->core.initialAwaitResumed = false;
         frame->core.bodyAlive = false;
 
         try {
@@ -287,7 +291,9 @@ struct CoroutineFrame {
         return frame;
     }
 
-    // 运行到下一个挂起点。catch 块就是标准协程体变换里的那个 catch。
+    // 运行到下一个挂起点。catch 块就是标准协程体变换里的那个 catch；step 只在初始挂起点
+    // 之后运行（第一条语句是 initial awaiter 的 await_resume），此时
+    // initial-await-resume-called 恒为真，所以这里没有"重新抛出"的分支。
     static FrameHeader* step(FrameHeader* const header) {
         auto* const frame = fromHeader(header);
         auto& core = frame->core;
@@ -297,11 +303,6 @@ struct CoroutineFrame {
         } catch (...) {
             // 异常离开协程体：等待中的 awaiter 临时对象与局部先于 catch 处理销毁。
             core.resetAwaiter();
-            if (not core.initialAwaitResumed) {
-                // 初始挂起点之前的异常：销毁协程状态，异常抛给调用方/恢复方。
-                destroy(header);
-                throw;
-            }
             core.destroyBody();
             // unhandled_exception 再抛出时，协程停在 final suspend point。
             core.prefix.header.done = true;

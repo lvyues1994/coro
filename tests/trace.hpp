@@ -299,6 +299,36 @@ template <class Lib> struct Types {
         using Owner<VoidPromise>::Owner;
     };
 
+    // initial_suspend 的 awaiter 在 await_resume 里抛出。标准在求值 await-resume 之前就把
+    // initial-await-resume-called 置真，所以这个异常进入 unhandled_exception，协程走到
+    // final suspend，帧仍由拥有者销毁。
+    struct StartThrowsTask;
+    struct StartThrowsPromise : PromiseBase<StartThrowsTask> {
+        using PromiseBase<StartThrowsTask>::PromiseBase;
+
+        struct ThrowingResume {
+            StartThrowsPromise* promise;
+            bool await_ready() const { return not promise->lazy; }
+            void await_suspend(Handle<>) const {}
+            void await_resume() const {
+                promise->log->add("initial_suspend await_resume throws");
+                throw std::runtime_error{"initial await_resume"};
+            }
+        };
+
+        ThrowingResume initial_suspend() {
+            this->log->add("initial_suspend");
+            return ThrowingResume{this};
+        }
+
+        StartThrowsTask get_return_object();
+        void return_void() { this->log->add("return_void"); }
+    };
+    struct StartThrowsTask : Owner<StartThrowsPromise> {
+        using promise_type = StartThrowsPromise;
+        using Owner<StartThrowsPromise>::Owner;
+    };
+
     // final_suspend 不挂起：协程状态自动销毁，返回对象不拥有任何东西。
     struct FireAndForget {
         struct promise_type {
@@ -339,6 +369,13 @@ template <class Lib>
 typename Types<Lib>::VoidTask Types<Lib>::VoidPromise::get_return_object() {
     this->log->add("get_return_object");
     return VoidTask{Handle<VoidPromise>::from_promise(*this)};
+}
+
+template <class Lib>
+typename Types<Lib>::StartThrowsTask
+Types<Lib>::StartThrowsPromise::get_return_object() {
+    this->log->add("get_return_object");
+    return StartThrowsTask{Handle<StartThrowsPromise>::from_promise(*this)};
 }
 
 // 带 operator co_await 的 awaitable。C++14 下拼作 operator_co_await；C++20 构建再补上

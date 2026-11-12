@@ -213,7 +213,6 @@ template <class Promise, class Body, class Allocator> struct CoroutineFrame {
     FramePrefix<Promise> prefix;                       // 必须是第一个成员
     alignas(Body) unsigned char body[sizeof(Body)];    // 参数副本 + 局部 + pc + awaiter 槽
     alignas(Allocator) unsigned char allocator[sizeof(Allocator)];
-    bool initialAwaitResumed;
 };
 static_assert(std::is_standard_layout<CoroutineFrame<P, B, A>>::value, "...");
 
@@ -296,7 +295,7 @@ auto count(int& value) -> Counter {
         co2::detail::FrameHeader* operator()(co2::detail::BodyContext<Promise>& ctx) {
             switch (pc) {
             case 0:
-                ctx.finishInitialSuspend();     // initial awaiter 的 await_resume()；成功后置 initialAwaitResumed
+                ctx.finishInitialSuspend();     // initial awaiter 的 await_resume()
                 ...用户代码...
                 // 掉出末尾：
                 ctx.returnVoidIfPresent();      // 没有 return_void 时是编译错误（标准是 UB，这里更严）
@@ -339,10 +338,6 @@ static FrameHeader* step(FrameHeader* header) {
         return frame.bodyRef()(frame.context());
     } catch (...) {
         frame.slot().reset();                       // 销毁等待中的 awaiter 临时对象
-        if (!frame.initialAwaitResumed) {           // 初始挂起点之前（含 initial awaiter 的 await_resume）：
-            destroyFrame(frame);                    // 销毁协程状态，异常抛给调用方/恢复方
-            throw;
-        }
         frame.header().done = true;                 // 若 unhandled_exception 再抛出，协程停在 final suspend point
         frame.promise().unhandled_exception();
         frame.header().done = false;
@@ -381,9 +376,18 @@ Return startCoroutine(Body body, Allocator allocator) {
 ```
 
 `initial_suspend()` 的 awaiter 保存在帧的 awaiter 槽中；`case 0` 的第一条语句是它的
-`await_resume()`，成功后置 `initialAwaitResumed`。这样"初始挂起点之前的异常"
-（含 `await_resume` 抛出）无论发生在 ramp 还是第一次 `resume()`，都走 `step` 的
-"销毁帧并重抛"分支，与标准一致。
+`await_resume()`。标准在求值 await-resume **之前**就把 initial-await-resume-called 置真
+（[dcl.fct.def.coroutine]/5），所以变换里的 try 块正好沿这条线分成两段：
+
+- 为假的一段（promise 构造、`get_return_object`、`initial_suspend()`、`await_ready`、
+  `await_suspend`）全部在 ramp 里，异常由 `destroyOnException` 销毁帧并抛给调用方；
+- 为真的一段从 initial awaiter 的 `await_resume()` 开始，在 `step` 里。`await_resume()`
+  抛出的异常与协程体里的异常一样进入 `unhandled_exception()`，协程走到 final suspend，
+  帧仍由拥有者销毁。
+
+`step` 因此不需要 `initialAwaitResumed` 标志，也没有"销毁帧并重抛"的分支。早期实现把
+`await_resume()` 的异常也当作"初始挂起点之前"抛给恢复方并销毁帧，拥有者随后
+`destroy()` 就是二次释放；差分测试（场景 8）与 GCC、Clang 的原生协程对齐后已更正。
 
 ## 5. 数据与状态
 
@@ -398,7 +402,7 @@ Return startCoroutine(Body body, Allocator allocator) {
 | Body   { 参数引用..., 局部... }                |   宏生成
 | AwaitSlot（内联 8 指针，超出退化为堆）          |
 | unsigned suspendPoint                       |
-| bool initialAwaitResumed, bodyAlive         |
+| bool bodyAlive                              |
 +---------------------------------------------+
 | Allocator                                   |   rebind 后的分配器副本
 +---------------------------------------------+

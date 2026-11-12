@@ -302,6 +302,41 @@ template <class Make> EventLog runFire(Make make) {
     return log;
 }
 
+// ---------------------------------------------------------------------------
+// 场景 8：initial awaiter 的 await_resume 抛出（进入 unhandled_exception，帧保留）
+
+auto co2StartThrows(EventLog& log, bool lazy)
+    CO2_BEG(C::StartThrowsTask, (log, lazy)) {
+    log.add("body");
+    CO2_RETURN();
+}
+CO2_END
+
+S::StartThrowsTask stdStartThrows(EventLog& log, [[maybe_unused]] bool lazy) {
+    log.add("body");
+    co_return;
+}
+
+template <class Task, class Make> EventLog runStartThrows(Make make, bool const lazy) {
+    EventLog log;
+    {
+        Task task = make(log, lazy);
+        log.add("-- returned to caller");
+        if (lazy) {
+            try {
+                task.resume();
+                log.add("-- resume returned");
+            } catch (std::runtime_error const&) {
+                log.add("-- resume threw");
+            }
+        }
+        log.add(task.done() ? "-- done" : "-- not done");
+        log.add(task.promise().error ? "-- exception captured" : "-- no exception");
+    }
+    log.add("-- owner destroyed");
+    return log;
+}
+
 } // namespace
 
 int main() {
@@ -326,4 +361,10 @@ int main() {
     compare("destroy while suspended", runDestroyWhileSuspended<C::VoidTask>(co2Parked),
             runDestroyWhileSuspended<S::VoidTask>(stdParked));
     compare("fire and forget", runFire(co2Fire), runFire(stdFire));
+    compare("initial await_resume throws (lazy)",
+            runStartThrows<C::StartThrowsTask>(co2StartThrows, true),
+            runStartThrows<S::StartThrowsTask>(stdStartThrows, true));
+    compare("initial await_resume throws (eager)",
+            runStartThrows<C::StartThrowsTask>(co2StartThrows, false),
+            runStartThrows<S::StartThrowsTask>(stdStartThrows, false));
 }
