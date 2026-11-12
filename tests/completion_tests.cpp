@@ -16,6 +16,7 @@
 #include "co2/completion.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/error.hpp"
+#include "co2/just.hpp"
 #include "co2/manual_executor.hpp"
 #include "co2/optional.hpp"
 #include "co2/spawn.hpp"
@@ -583,6 +584,66 @@ void anErrorStillCrossesAnAwaiterThatOnlyKnowsThreeMembers() {
     CHECK(sawOriginal);
 }
 
+// ---------------------------------------------------------------------------
+// just_error 与 with_error：在协程体里直接以错误结束
+
+auto failsWithJustError(bool& reached) CO2_BEG(co2::Task<int>, (reached)) {
+    CO2_AWAIT(co2::just_error(sample::Errc::retry_later));
+    reached = true;
+    CO2_RETURN(0);
+}
+CO2_END
+
+auto failsWithWithError(bool& reached) CO2_BEG(co2::Task<int>, (reached)) {
+    CO2_YIELD(co2::with_error(sample::Errc::retry_later));
+    reached = true;
+    CO2_RETURN(0);
+}
+CO2_END
+
+bool throwsRetryLater(co2::Task<int> task) {
+    try {
+        co2::syncWait(std::move(task));
+    } catch (std::system_error const& exception) {
+        return exception.code() == sample::Errc::retry_later;
+    }
+    return false;
+}
+
+void justErrorAndWithErrorEndTheTaskWithThatError() {
+    auto reached = false;
+    CHECK(throwsRetryLater(failsWithJustError(reached)));
+    CHECK(throwsRetryLater(failsWithWithError(reached)));
+    CHECK(not reached);
+}
+
+auto recorderFailsWithJustError(bool& reached) CO2_BEG(Recorder, (reached)) {
+    CO2_AWAIT(co2::just_error(std::make_error_code(std::errc::timed_out)));
+    reached = true;
+}
+CO2_END
+
+// just_error 是普通的 awaitable：任何提供了 return_error() 的 promise 都能用。
+void justErrorWorksInAnyPromiseThatHasTheEntry() {
+    auto reached = false;
+    auto const coroutine = recorderFailsWithJustError(reached);
+    CHECK(coroutine.promise().outcome == Outcome::failed);
+    CHECK(coroutine.promise().code == std::errc::timed_out);
+    CHECK(not reached);
+}
+
+// 不认识 await_completion() 的调用方直接调用 await_resume()：错误以异常的形式出现。
+void justErrorRaisesForACallerThatSkipsAwaitCompletion() {
+    auto const awaiter = co2::just_error(sample::Errc::gone);
+    auto sawCode = false;
+    try {
+        awaiter.await_resume();
+    } catch (std::system_error const& exception) {
+        sawCode = exception.code() == sample::Errc::gone;
+    }
+    CHECK(sawCode);
+}
+
 } // namespace
 
 int main() {
@@ -605,5 +666,8 @@ int main() {
     aDeepChainPropagatesWithoutGrowingTheStack();
     anLvalueTaskPropagatesTheSameWay();
     anErrorStillCrossesAnAwaiterThatOnlyKnowsThreeMembers();
+    justErrorAndWithErrorEndTheTaskWithThatError();
+    justErrorWorksInAnyPromiseThatHasTheEntry();
+    justErrorRaisesForACallerThatSkipsAwaitCompletion();
     return 0;
 }

@@ -12,6 +12,7 @@
 #include "co2/coroutine.hpp"
 #include "co2/env.hpp"
 #include "co2/error.hpp"
+#include "co2/just.hpp"
 #include "co2/optional.hpp"
 #include "co2/result.hpp"
 #include "co2/stop_token.hpp"
@@ -119,6 +120,12 @@ template <class T> struct TaskPromise {
     // 结果结束。由恢复点在协程体收尾之后调用，见 FrameCore::finishUnlessValue。
     void return_error(Error error) noexcept { fail(std::move(error)); }
     void return_stopped() noexcept { state = TaskState::stopped; }
+
+    // CO2_YIELD(co2::with_error(e))：P3552 的拼写，效果同 CO2_AWAIT(co2::just_error(e))。
+    // Task 不能 yield 别的东西。
+    JustError yield_value(WithError failure) noexcept {
+        return JustError{std::move(failure.error)};
+    }
 
     // ---- 环境 ----
 

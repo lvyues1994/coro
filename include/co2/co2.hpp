@@ -10,6 +10,7 @@
 #include "co2/env.hpp"
 #include "co2/error.hpp"
 #include "co2/generator.hpp"
+#include "co2/just.hpp"
 #include "co2/manual_executor.hpp"
 #include "co2/optional.hpp"
 #include "co2/result.hpp"
