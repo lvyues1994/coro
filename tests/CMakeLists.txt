@@ -11,7 +11,8 @@ set(co2_test_sources
     callback_tests.cpp
     allocation_tests.cpp
     edge_case_tests.cpp
-    vocabulary_tests.cpp)
+    vocabulary_tests.cpp
+    completion_tests.cpp)
 
 # 契约违规测试：程序在预期的失败点经由契约处理器以退出码 86 结束。
 set(co2_contract_violation_test_sources
@@ -24,7 +25,8 @@ set(co2_contract_violation_test_sources
     async_generator_destroy_contract_violation_test.cpp
     continuation_twice_contract_violation_test.cpp
     optional_empty_value_contract_violation_test.cpp
-    error_from_success_code_contract_violation_test.cpp)
+    error_from_success_code_contract_violation_test.cpp
+    stopped_without_entry_contract_violation_test.cpp)
 
 # 构建测试用的 C++ 标准。库的最低要求是 14，默认就测它；CI 另以 17 / 20 / 23 各跑一遍，
 # 保证较新的标准下（弃用告警、更严格的规则）同样干净。

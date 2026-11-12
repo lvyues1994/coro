@@ -198,6 +198,10 @@
 // await_ready → await_suspend（void / bool / coroutine_handle）→ await_resume。
 // `awaiter_type` 是最终 awaiter 的类型（括号包裹，允许含逗号的模板实参）；
 // `awaitable_expression` 已经完成 await_transform。
+//
+// 恢复点（case 标签之后）比标准多一步：awaiter 有 await_completion() 时先问它这次等待
+// 是怎么结束的；出错或已停止就此结束协程，不调用 await_resume()，见
+// FrameCore::finishUnlessValue。
 #define CO2_DETAIL_AWAIT_IMPL(awaiter_type, resume, awaitable_expression, unique)      \
     do {                                                                               \
         using _co2_awaiter_type = CO2_DETAIL_PP_REMOVE_PARENS_I awaiter_type;          \
@@ -214,6 +218,11 @@
             _co2_context.markRunning();                                                \
         }                                                                              \
     case CO2_DETAIL_SUSPEND_POINT(unique):                                             \
+        {                                                                              \
+            ::co2::detail::FrameHeader* _co2_next = nullptr;                           \
+            if (_co2_context.template finishUnlessValue<_co2_awaiter_type>(_co2_next)) \
+                return _co2_next;                                                      \
+        }                                                                              \
         resume(_co2_context.template awaiter<_co2_awaiter_type>().await_resume());     \
         _co2_context.template resetAwaiterAs<_co2_awaiter_type>();                     \
     } while (false)

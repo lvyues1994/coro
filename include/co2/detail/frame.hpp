@@ -8,6 +8,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "co2/completion.hpp"
 #include "co2/contract.hpp"
 #include "co2/coroutine_handle.hpp"
 #include "co2/detail/await_slot.hpp"
@@ -48,6 +49,31 @@ enum class SuspendPoint : unsigned {};
 template <class Promise>
 struct AwaitStorageSize
     : std::integral_constant<std::size_t, CO2_AWAIT_STORAGE_SIZE> {};
+
+// promise 上接收"没有值"的两个入口，都是可选的：
+//
+//   void return_stopped() noexcept;          // 协程以已停止结束
+//   void return_error(co2::Error) noexcept;  // 协程以错误结束
+//
+// 名字比照 return_value / return_void。它们只记录结果，向等待者转交由随后的
+// final_suspend 完成。与 P2300 的 unhandled_stopped() 不同名是有意的：那个成员返回要
+// 恢复的句柄，调用它之后协程不再被恢复；这里的入口在协程体收尾之后被调用。
+template <class Promise> struct HasReturnStopped {
+    template <class P>
+    static auto probe(int)
+        -> decltype(std::declval<P&>().return_stopped(), std::true_type{});
+    template <class> static std::false_type probe(long);
+    using type = decltype(probe<Promise>(0));
+};
+
+template <class Promise> struct HasReturnError {
+    template <class P>
+    static auto probe(int)
+        -> decltype(std::declval<P&>().return_error(std::declval<Error>()),
+                    std::true_type{});
+    template <class> static std::false_type probe(long);
+    using type = decltype(probe<Promise>(0));
+};
 
 // 帧中与 allocator 无关的部分。Body 的 operator() 以它为上下文，因此每个协程体只
 // 实例化一份 step 逻辑，不随 allocator 变化。
@@ -152,7 +178,66 @@ template <class Promise, class Params, class Body> struct FrameCore {
         return outcome.next;
     }
 
+    // 恢复点：在 await_resume() 之前问 awaiter 这次等待是怎么结束的。
+    //
+    // 返回 false：有值（或者 awaiter 没有 await_completion()，那就一定有值），生成的代码
+    // 照常调用 await_resume() 并继续。返回 true：出错或已停止，协程已经就此结束——
+    // awaiter 与局部已销毁，promise 已收到结果，final_suspend 已经求值——`next` 是要转移
+    // 到的目标，Body 必须立刻返回它，不能再碰自己的任何成员。
+    template <class Awaiter> bool finishUnlessValue(FrameHeader*& next) {
+        return finishUnlessValue<Awaiter>(next,
+                                          typename HasAwaitCompletion<Awaiter>::type{});
+    }
+
   private:
+    template <class Awaiter>
+    bool finishUnlessValue(FrameHeader*&, std::false_type) noexcept {
+        return false;
+    }
+
+    template <class Awaiter>
+    bool finishUnlessValue(FrameHeader*& next, std::true_type) {
+        Completion completion = awaiter<Awaiter>().await_completion();
+        if (completion.isValue()) return false;
+        next = completion.isStopped()
+                   ? finishStopped<Awaiter>(typename HasReturnStopped<Promise>::type{})
+                   : finishFailed<Awaiter>(std::move(completion).error(),
+                                           typename HasReturnError<Promise>::type{});
+        return true;
+    }
+
+    // 收尾的顺序与异常逃出协程体时相同：awaiter → 局部 → promise 的入口 →
+    // final_suspend。
+    template <class Awaiter> FrameHeader* finishStopped(std::true_type) noexcept {
+        resetAwaiterAs<Awaiter>();
+        destroyBody();
+        promise().return_stopped();
+        return enterFinalSuspend();
+    }
+
+    // promise 没有 return_stopped()：已停止既不是值，也不是能抛进协程体的错误。
+    template <class Awaiter>
+    [[noreturn]] FrameHeader* finishStopped(std::false_type) noexcept {
+        CO2_CONTRACT_FAIL("a stopped completion reached a promise that has no "
+                          "return_stopped()");
+    }
+
+    template <class Awaiter>
+    FrameHeader* finishFailed(Error&& error, std::true_type) noexcept {
+        resetAwaiterAs<Awaiter>();
+        destroyBody();
+        promise().return_error(std::move(error));
+        return enterFinalSuspend();
+    }
+
+    // promise 没有 return_error()：在协程体内重新抛出，和 await_resume() 抛出一样落进
+    // step 的 catch——awaiter 与局部由那里销毁，promise 收到 unhandled_exception()。为
+    // 标准写的 promise 因此照常工作。
+    template <class Awaiter>
+    [[noreturn]] FrameHeader* finishFailed(Error&& error, std::false_type) {
+        error.raise();
+    }
+
     template <class P = Promise>
     auto returnVoidAtEnd(int) -> decltype(std::declval<P&>().return_void()) {
         return promise().return_void();

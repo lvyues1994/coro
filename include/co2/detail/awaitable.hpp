@@ -88,8 +88,29 @@ template <class Awaiter> struct AwaiterRef {
         return target->await_resume();
     }
 
+    // 可选成员也要转发：没有它，按左值等待的 awaiter 会悄悄丢掉"出错 / 已停止"这两种
+    // 结果。原对象没有这个成员时，这里也没有。
+    template <class A = Awaiter>
+    auto await_completion() -> decltype(std::declval<A&>().await_completion()) {
+        return target->await_completion();
+    }
+
   private:
     Awaiter* target;
+};
+
+// ---- await_completion()：co2 对 awaiter 协议的扩展 ----
+//
+// awaiter 可以多提供一个成员 `co2::Completion await_completion() noexcept`，报告这次等待
+// 是怎么结束的：有值、出错、还是已停止。宏生成的代码对每次等待恰好调用它一次，先于
+// await_resume()；只有"有值"才接着调用 await_resume()。没有这个成员的 awaiter——标准
+// 写法的所有 awaiter——在编译期就没有这段检查。
+template <class Awaiter> struct HasAwaitCompletion {
+    template <class A>
+    static auto probe(int)
+        -> decltype(std::declval<A&>().await_completion(), std::true_type{});
+    template <class> static std::false_type probe(long);
+    using type = decltype(probe<Awaiter>(0));
 };
 
 template <class AwaiterExpression> struct AwaiterStorage {
