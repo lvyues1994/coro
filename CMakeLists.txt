@@ -65,7 +65,7 @@ configure_package_config_file(
 
 if(CO2_VERSION_PRERELEASE)
     # CMake 的版本请求只接受数字分量，无法准确表达 SemVer 预发布标识。预览包允许
-    # 无版本 find_package，但拒绝所有数字版本请求，避免被当作正式 0.2.0 接受。
+    # 无版本 find_package，但拒绝所有数字版本请求，避免被当作同号的正式版接受。
     configure_file(
         cmake/co2ConfigVersion.cmake.in
         ${CMAKE_CURRENT_BINARY_DIR}/co2ConfigVersion.cmake

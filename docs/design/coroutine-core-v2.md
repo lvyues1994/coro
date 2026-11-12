@@ -467,9 +467,12 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
 - **D1 局部对象**：跨挂起点存活的局部必须写在 `CO2_BEG` 的局部列表里，成为帧成员，
   **在帧创建时构造**（标准是在声明点构造）。析构时机与标准一致：离开协程体作用域
   时——`co_return`、掉出末尾、异常逃出——先于 `final_suspend`；挂起中被 `destroy()`
-  时在 promise 之前。协程体内用 `auto` 声明的变量不能跨越挂起点（`case` 标签不能
-  跨过初始化，这是编译错误而非静默错误）。挂起点不能出现在 `try` 块、lambda 或嵌套
-  函数内。
+  时在 promise 之前。协程体内直接声明的变量住在栈上，不能跨越挂起点：带初始化的
+  声明（以及任何非平凡类型）跨越挂起点是编译错误——`case` 标签不能跳过初始化。**但
+  不带初始化的平凡类型（`int sum;`）编译器不拦**：跳过这样的声明是合法 C++，恢复之后
+  读到的是不确定的值，`-Wall -Wextra` 也不报。宏无法检测这种情况，约定是体内的声明
+  一律带初始化（clang-tidy 的 `cppcoreguidelines-init-variables` 可以强制）。挂起点不能
+  出现在 `try` 块、lambda 或嵌套函数内。
 - **D2 对称转移**：标准靠尾调用；这里靠 `resume()` 内的迭代循环。可观察行为相同
   （栈深不随转移链增长），差别是 `await_suspend` 返回的句柄由**当前 resumer 的**
   循环执行，而不是被调函数尾跳转——对 awaiter 作者没有影响。
@@ -486,8 +489,10 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
 - **D7 `operator co_await` 的拼写**：C++14 没有 `co_await` 关键字，成员/非成员
   `operator co_await` 以 `operator_co_await` 拼写；C++20 构建下两种拼写都被查找，
   为 `std::` 写的 awaitable 无需改动。
-- **D8 lvalue awaitable**：`co_await lvalue` 在标准里直接使用该对象；这里 awaiter 会被
-  复制/移动进帧的 awaiter 槽（move-only 的 awaitable 需要 `std::move`）。
+- **D8 lvalue awaitable 与可移动性**：`co_await lvalue` 在标准里直接使用该对象；这里
+  awaiter 会被复制/移动进帧的 awaiter 槽（move-only 的 awaitable 需要 `std::move`）。
+  由此 awaiter 必须可移动构造：C++17 起靠保证复制消除就能被原生 `co_await` 等待的
+  不可移动 awaiter（例如带 `std::atomic` 成员的）在 co2 里编不过。
 - **D9 宽松之处**：`await_transform` 只对能匹配的重载生效，匹配失败时原样等待
   （标准：只要 promise 有 `await_transform`，不匹配就是编译错误）；`get_return_object`
   的结果允许显式转换到返回类型；带协程参数的 `operator new(size, params...)` 重载
@@ -508,6 +513,12 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
   switch 时无法隐式转换成那个 switch 的条件类型，因此是**编译错误**
   （`tests/await_inside_switch_compile_fail_test.cpp`）。需要分支时用 `if`/`else`，或把
   等待放到 switch 之外。
+- **D13 成员函数与 `this`**：标准把隐式对象参数当作第一个协程参数（promise 构造能
+  收到 `*this`，体内可以直接用成员）。这里协程体是局部类的成员函数，外层的 `this` 与
+  成员名都访问不到。成员函数可以是协程，但要把对象显式作为参数传进来（通常写成
+  `static` 成员函数加一个 `Self& self` 参数）。
+- **D14 宏实参的个数**：捕获列表最多 8 个参数；`CO2_BEG` 的局部列表与 `CO2_RETURN` 的
+  表达式里每个顶层逗号都多算一个宏实参，总数上限 64（`detail/preprocessor.hpp`）。
 
 除此之外的任何差异都应视为缺陷。
 
@@ -897,7 +908,8 @@ GetStopToken)` 返回一个不挂起的 awaiter。为此 `TaskPromise` 有了 `a
 
 - `spawn(scheduler, task, parent = {})`：给 Task 设好续体与 token 后**直接把它的句柄
   排给 scheduler**——惰性 Task 停在初始挂起点，本身就是可排队的句柄，第一次恢复就发生
-  在 scheduler 的线程上，没有跳板帧。每个 spawn 一次堆分配（`JoinState`）。
+  在 scheduler 的线程上，没有跳板帧。帧之外每个 spawn 两次堆分配：`JoinState`，以及
+  它的 `stop_source` 的停止状态（`tests/allocation_tests.cpp` 钉住了这个数）。
 - 每个根有自己的 `stop_source`：`JoinHandle::requestStop()` 请求它；传入 `parent` 时
   `JoinState` 里的 `stop_callback<ForwardStop>` 把父的请求转发过来（父已请求则构造时
   立即转发，Task 一启动就看到已请求）。
@@ -993,7 +1005,9 @@ benchmarks/co2_benchmarks.cpp
 1. Event / Mutex / WorkGroup：awaiter 内侵入式节点保存 `coroutine_handle<>`；取消通过
    `stop_callback` 摘除节点并以取消结果恢复。
 2. Timer：`TimerService` 接口 + steady/manual 实现；`withTimeout` 建立在 `race` 之上。
-3. `whenAll` / `whenAny` / `race`：向败者请求 stop 并等待其完成。
+3. `whenAny` / `race`：向败者请求 stop 并等待其完成（`whenAll` 已在 `when_all.hpp`
+   重建；回调适配已在 `callback.hpp` 重建）。
 4. `TaskScope`（P3149 `async_scope`）：析构前必须 join；`SharedTask`。
 5. C++20 互操作层：`std::coroutine_handle` ↔ `co2::coroutine_handle` 的桥。
-6. 版本号：v2 是不兼容重写，`0.2.0-pre` 应升为新的主/次版本，与包版本策略一并决定。
+6. 版本号：v2 是不兼容重写，已从 `0.2.0-pre` 升到 `0.3.0-pre`；正式版本号与包版本
+   策略一并决定。

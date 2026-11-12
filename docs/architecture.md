@@ -18,6 +18,7 @@ C++14 没有语言级协程。co2 用宏生成的 switch 状态机模拟挂起�
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ 根适配器          sync_wait.hpp   spawn.hpp                      │
+│ 组合 / 适配       when_all.hpp    callback.hpp                   │
 ├────────────────────────────────────────────────────────────────┤
 │ 执行层            scheduler.hpp  manual_executor.hpp  thread_pool.hpp │
 ├────────────────────────────────────────────────────────────────┤
@@ -28,6 +29,7 @@ C++14 没有语言级协程。co2 用宏生成的 switch 状态机模拟挂起�
 │                   detail/awaitable.hpp  detail/frame.hpp         │
 ├────────────────────────────────────────────────────────────────┤
 │ 构件              detail/await_slot.hpp  detail/result_storage.hpp │
+│                   detail/over_aligned.hpp  detail/ring_queue.hpp │
 │                   detail/preprocessor.hpp  contract.hpp  config.hpp │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -178,9 +180,10 @@ token 的基准：240 → 20 ns/await）。等待者不是 co2 自己的 promise
 
 ## 尚未重建的 v1 能力
 
-事件 / 协程互斥锁 / WorkGroup、定时器与超时、`whenAll` / `whenAny` / `race`、
-`SharedTask`、`TaskScope`（P3149 `async_scope`）、回调适配、C++20
-`std::coroutine_handle` 互操作层。它们将在标准销毁契约与 `stop_token` 之上重建：
+事件 / 协程互斥锁 / WorkGroup、定时器与超时、`whenAny` / `race`、`SharedTask`、
+`TaskScope`（P3149 `async_scope`）、C++20 `std::coroutine_handle` 互操作层
+（`whenAll` 与回调适配 `fromCallback` 已经重建）。它们将在标准销毁契约与 `stop_token`
+之上重建：
 awaiter 内侵入式节点保存 `coroutine_handle<>`，取消通过注册 `stop_callback` 把自己
 从队列摘除并以取消结果恢复协程；`race`/`withTimeout` 向败者请求 stop 并等待其完成；
 `TaskScope` 析构前必须 join。
