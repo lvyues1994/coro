@@ -90,6 +90,46 @@ void awaitAsAcceptsExpressionsWithLambdas() {
     CHECK(co2::syncWait(usesAwaitAs(41)) == 42);
 }
 
+// CO2_AWAIT_AS 给出的类型决定 awaiter 在帧里的形式：左值引用类型就地使用那个对象（与
+// CO2_AWAIT 对左值的默认行为相同）；非引用类型则把它复制进帧。后者是一条出路——左值
+// 所指的对象活不过挂起点时（例如它属于表达式里的某个临时对象），就要一份副本。
+struct SelfAware {
+    SelfAware(int& copies_) noexcept : copies{&copies_} {}
+    SelfAware(SelfAware const& other) noexcept
+        : copies{other.copies}, original{other.original} {
+        ++*copies;
+    }
+    SelfAware& operator=(SelfAware const&) = delete;
+
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(co2::coroutine_handle<>) const noexcept {}
+    // 协议调用落在原对象上，还是落在帧里的副本上。
+    bool await_resume() const noexcept { return this == original; }
+
+    int* copies;
+    SelfAware const* original{this};
+};
+
+auto awaitsAsReferenceThenAsValue(SelfAware& awaiter, bool& referenceUsedOriginal,
+                                  bool& valueUsedOriginal)
+    CO2_BEG(co2::Task<>, (awaiter, referenceUsedOriginal, valueUsedOriginal)) {
+    CO2_AWAIT_AS_SET(referenceUsedOriginal, SelfAware&, awaiter);
+    CO2_AWAIT_AS_SET(valueUsedOriginal, SelfAware, awaiter);
+}
+CO2_END
+
+void awaitAsChoosesBetweenInPlaceAndACopy() {
+    auto copies = 0;
+    SelfAware awaiter{copies};
+    auto referenceUsedOriginal = false;
+    auto valueUsedOriginal = true;
+    co2::syncWait(
+        awaitsAsReferenceThenAsValue(awaiter, referenceUsedOriginal, valueUsedOriginal));
+    CHECK(referenceUsedOriginal);
+    CHECK(not valueUsedOriginal);
+    CHECK(copies == 1);
+}
+
 // ---------------------------------------------------------------------------
 // 局部列表与 CO2_RETURN 的实参里可以有很多顶层逗号（模板实参、花括号初始化）。宏按
 // 实参个数选择展开分支，个数上限是 64，而不是早先的 8。
@@ -479,6 +519,7 @@ void spawnedTasksMaySpawnAndAwaitOnTheSamePool() {
 
 int main() {
     awaitAsAcceptsExpressionsWithLambdas();
+    awaitAsChoosesBetweenInPlaceAndACopy();
     macroArgumentsMayContainManyTopLevelCommas();
     largeAwaitersFallBackToTheHeapTransparently();
     unstartedGeneratorReleasesItsParameters();

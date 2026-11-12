@@ -489,10 +489,13 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
 - **D7 `operator co_await` 的拼写**：C++14 没有 `co_await` 关键字，成员/非成员
   `operator co_await` 以 `operator_co_await` 拼写；C++20 构建下两种拼写都被查找，
   为 `std::` 写的 awaitable 无需改动。
-- **D8 lvalue awaitable 与可移动性**：`co_await lvalue` 在标准里直接使用该对象；这里
-  awaiter 会被复制/移动进帧的 awaiter 槽（move-only 的 awaitable 需要 `std::move`）。
-  由此 awaiter 必须可移动构造：C++17 起靠保证复制消除就能被原生 `co_await` 等待的
-  不可移动 awaiter（例如带 `std::atomic` 成员的）在 co2 里编不过。
+- **D8 右值 awaiter 必须可移动**：右值（纯右值、将亡值）awaiter 被移动进帧的 awaiter
+  槽——C++14 没有保证复制消除，纯右值无法直接落在帧里。C++17 起靠复制消除就能被原生
+  `co_await` 等待的不可移动纯右值（`co_await makeImmovable()`）在 co2 里编不过。
+  **左值不受此限**：`co_await lvalue` 与标准一样就地使用那个对象，帧里只记它的地址
+  （`detail::AwaiterRef`，差分测试场景 12）。协议调用落在原对象上；不可复制、不可
+  移动的 awaiter 可以先声明成帧局部，再按左值等待。早先的实现把左值也复制进帧，是
+  一条语义偏离，现已去掉。
 - **D9 宽松之处**：`await_transform` 只对能匹配的重载生效，匹配失败时原样等待
   （标准：只要 promise 有 `await_transform`，不匹配就是编译错误）；`get_return_object`
   的结果允许显式转换到返回类型；带协程参数的 `operator new(size, params...)` 重载
@@ -502,7 +505,10 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
   调用 `await_suspend` 之前就已销毁，**只有 awaiter 本身**被放进帧。因此 awaiter 不能
   借用表达式里其他临时对象（例如 `CO2_AWAIT(op(std::string{"x"}))` 里 awaiter 存
   `string_view`）。库自身受此影响的地方都改为由 awaiter 拥有：右值 `Task` 直接作为
-  awaiter 移进槽里（`elements_of` 的嵌套生成器同理）。
+  awaiter 移进槽里（`elements_of` 的嵌套生成器同理）。左值 awaiter 同理：帧里只记它的
+  地址，它所指的对象必须活过挂起点。由表达式里的临时对象得到的左值（`*makeUnique()`、
+  `makeVector().front()`）在标准里因为临时对象被保活而可用，在这里是悬空的；这种情况用
+  `CO2_AWAIT_AS(T, e)` 给出非引用类型，要一份搬进帧的副本。
 - **D11 yield 的 prvalue**：`std::generator` 的 `yield_value(T&&)` 只存指针（临时对象
   由帧保活）；这里由 D10 可知临时对象活不过挂起点，所以 `Generator<T>` /
   `AsyncGenerator<T>` 把 prvalue **移进帧内的存储**，恢复时销毁——多一次移动，析构

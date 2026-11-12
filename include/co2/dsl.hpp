@@ -238,6 +238,11 @@
 
 // 表达式含 lambda 时 decltype 不可用，显式给出 awaitable 的类型。类型含逗号（模板实参）
 // 时用括号包裹：CO2_AWAIT_AS((Awaitable<A, B>), e)。
+//
+// 给出的类型同时决定 awaiter 在帧里的形式：左值引用类型（T&）就地使用那个对象，与
+// CO2_AWAIT 对左值表达式的默认行为相同；非引用类型（T）把它复制/移动进帧。左值所指的
+// 对象活不过挂起点时——例如它属于表达式里的某个临时对象，*makeUnique() 这样——用后者
+// 要一份副本。
 #define CO2_AWAIT_AS(awaitable_type, expression)                                       \
     CO2_DETAIL_AWAIT_IMPL(                                                             \
         (::co2::detail::AwaiterFor<_co2_promise_type,                                  \

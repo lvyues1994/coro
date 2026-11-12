@@ -444,6 +444,53 @@ template <class Widget> EventLog runMember() {
     return log;
 }
 
+// ---------------------------------------------------------------------------
+// 场景 12：co_await 左值。awaiter 就是那个对象本身，协议调用不落在副本上。
+
+template <class Lib> struct IdentityAwaiter {
+    explicit IdentityAwaiter(EventLog& log_) : log{&log_} {}
+    IdentityAwaiter(IdentityAwaiter const&) = delete;
+    IdentityAwaiter& operator=(IdentityAwaiter const&) = delete;
+
+    bool await_ready() {
+        log->add(std::string{"await_ready on "} + where());
+        return false;
+    }
+    bool await_suspend(typename Lib::template Handle<>) {
+        log->add(std::string{"await_suspend on "} + where());
+        return false;
+    }
+    void await_resume() { log->add(std::string{"await_resume on "} + where()); }
+
+    char const* where() const { return this == original ? "the original" : "a copy"; }
+
+    EventLog* log;
+    IdentityAwaiter const* original{this};
+};
+
+auto co2AwaitsLvalue(EventLog& log, bool lazy, IdentityAwaiter<Co2Lib>& awaiter)
+    CO2_BEG(C::VoidTask, (log, lazy, awaiter)) {
+    CO2_AWAIT(awaiter);
+    CO2_AWAIT(awaiter);
+    CO2_RETURN();
+}
+CO2_END
+
+S::VoidTask stdAwaitsLvalue([[maybe_unused]] EventLog& log, [[maybe_unused]] bool lazy,
+                            IdentityAwaiter<StdLib>& awaiter) {
+    co_await awaiter;
+    co_await awaiter;
+    co_return;
+}
+
+template <class Lib, class Task, class Make> EventLog runAwaitsLvalue(Make make) {
+    EventLog log;
+    IdentityAwaiter<Lib> awaiter{log};
+    Task task = make(log, false, awaiter);
+    log.add(task.done() ? "-- done" : "-- not done");
+    return log;
+}
+
 template <class Task, class Make> EventLog runStartThrows(Make make, bool const lazy) {
     EventLog log;
     {
@@ -502,6 +549,9 @@ int main() {
             runAggregate(co2Aggregate), runAggregate(stdAggregate));
     compare("member function coroutine", runMember<Co2Widget>(),
             runMember<StdWidget>());
+    compare("co_await lvalue uses the object in place",
+            runAwaitsLvalue<Co2Lib, C::VoidTask>(co2AwaitsLvalue),
+            runAwaitsLvalue<StdLib, S::VoidTask>(stdAwaitsLvalue));
 }
 
 // 库自己的 promise 类型不能被协程的参数构造。它们若是聚合类型，C++20 起第一个参数只要能

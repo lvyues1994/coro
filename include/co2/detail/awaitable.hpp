@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <type_traits>
 #include <utility>
 
@@ -62,11 +63,46 @@ auto getAwaiter(Awaitable&& awaitable)
     return toAwaiter(std::forward<Awaitable>(awaitable), Rank<4>{});
 }
 
-// awaiter 的存储类型：prvalue 结果按值保存；lvalue awaitable 也会被复制/移动进帧
-// （见设计稿 D9：标准会直接使用 lvalue 本身）。
+// ---- awaiter 在帧里的形式 ----
+//
+// getAwaiter 的结果是右值（纯右值或将亡值）时按值保存：宏展开里的临时对象活不过挂起点
+// （设计稿 D10），只能搬进帧。结果是左值时与标准一样就地使用那个对象（[expr.await]/3）：
+// 帧里只记它的地址，协议调用全部转发过去。于是它的状态变化落在原对象上，不可复制、不可
+// 移动的 awaiter 也能等待——只要它活过这次挂起，比如它是帧局部或引用参数。
+
+// 左值 awaiter 的帧内形式。const 左值的 Awaiter 带 const，调用的是 const 成员函数。
+template <class Awaiter> struct AwaiterRef {
+    explicit AwaiterRef(Awaiter& awaiter) noexcept : target{std::addressof(awaiter)} {}
+
+    auto await_ready() -> decltype(std::declval<Awaiter&>().await_ready()) {
+        return target->await_ready();
+    }
+
+    template <class Handle>
+    auto await_suspend(Handle const handle)
+        -> decltype(std::declval<Awaiter&>().await_suspend(handle)) {
+        return target->await_suspend(handle);
+    }
+
+    auto await_resume() -> decltype(std::declval<Awaiter&>().await_resume()) {
+        return target->await_resume();
+    }
+
+  private:
+    Awaiter* target;
+};
+
+template <class AwaiterExpression> struct AwaiterStorage {
+    using type = typename std::decay<AwaiterExpression>::type;
+};
+
+template <class Awaiter> struct AwaiterStorage<Awaiter&> {
+    using type = AwaiterRef<Awaiter>;
+};
+
 template <class Awaitable>
 using AwaiterOf =
-    typename std::decay<decltype(getAwaiter(std::declval<Awaitable>()))>::type;
+    typename AwaiterStorage<decltype(getAwaiter(std::declval<Awaitable>()))>::type;
 
 // ---- await_transform ----
 

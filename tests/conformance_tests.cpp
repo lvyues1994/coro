@@ -502,6 +502,108 @@ void operatorCoAwaitIsLookedUpAsMemberThenAdl() {
 }
 
 // ---------------------------------------------------------------------------
+// co_await 左值：awaiter 就是那个对象本身（[expr.await]/3），不是它的副本。协议调用作用
+// 在原对象上，外面看得到它的状态变化；不可复制、不可移动的 awaiter 因此也能等待，只要
+// 它是个活得够久的左值——比如帧局部。
+
+struct CountingAwaiter {
+    bool await_ready() noexcept {
+        ++readyCalls;
+        return false;
+    }
+    void await_suspend(co2::coroutine_handle<> const handle) noexcept {
+        ++suspendCalls;
+        parked = handle;
+    }
+    int await_resume() noexcept { return ++resumeCalls; }
+
+    int readyCalls{};
+    int suspendCalls{};
+    int resumeCalls{};
+    co2::coroutine_handle<> parked;
+};
+
+auto awaitsLvalueTwice(EventLog& log, bool lazy, CountingAwaiter& awaiter)
+    CO2_BEG(T::IntTask, (log, lazy, awaiter), int first{}; int second{};) {
+    CO2_AWAIT_SET(first, awaiter);
+    CO2_AWAIT_SET(second, awaiter);
+    CO2_RETURN(first * 10 + second);
+}
+CO2_END
+
+// 不可复制也不可移动：只能就地使用。
+struct PinnedAwaiter {
+    PinnedAwaiter() = default;
+    PinnedAwaiter(PinnedAwaiter const&) = delete;
+    PinnedAwaiter& operator=(PinnedAwaiter const&) = delete;
+
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(co2::coroutine_handle<>) const noexcept {}
+    int await_resume() noexcept { return ++resumeCalls; }
+
+    int resumeCalls{};
+};
+
+auto awaitsPinnedLocal(EventLog& log, bool lazy)
+    CO2_BEG(T::IntTask, (log, lazy), PinnedAwaiter pinned; int value{};) {
+    CO2_AWAIT_SET(value, pinned);
+    CO2_AWAIT_SET(value, pinned);
+    CO2_RETURN(value * 10 + pinned.resumeCalls);
+}
+CO2_END
+
+// const 左值：调用的是 const 成员函数，对象不被复制。
+struct ConstAwaiter {
+    ConstAwaiter() = default;
+    ConstAwaiter(ConstAwaiter const&) = delete;
+    ConstAwaiter& operator=(ConstAwaiter const&) = delete;
+
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(co2::coroutine_handle<>) const noexcept {}
+    ConstAwaiter const* await_resume() const noexcept { return this; }
+};
+
+auto awaitsConstLvalue(EventLog& log, bool lazy, ConstAwaiter const& awaiter,
+                       ConstAwaiter const*& seen)
+    CO2_BEG(T::VoidTask, (log, lazy, awaiter, seen)) {
+    CO2_AWAIT_SET(seen, awaiter);
+    CO2_RETURN();
+}
+CO2_END
+
+void lvalueAwaitersAreUsedInPlace() {
+    {
+        EventLog log;
+        CountingAwaiter awaiter;
+        auto task = awaitsLvalueTwice(log, false, awaiter);
+        CHECK(awaiter.readyCalls == 1);
+        CHECK(awaiter.suspendCalls == 1);
+        CHECK(awaiter.parked == task.handle);
+        awaiter.parked.resume();
+        CHECK(awaiter.resumeCalls == 1);
+        CHECK(awaiter.readyCalls == 2);
+        awaiter.parked.resume();
+        CHECK(task.done());
+        CHECK(task.promise().result == 12);
+        CHECK(awaiter.resumeCalls == 2);
+    }
+    {
+        EventLog log;
+        auto task = awaitsPinnedLocal(log, false);
+        CHECK(task.done());
+        CHECK(task.promise().result == 22);
+    }
+    {
+        EventLog log;
+        ConstAwaiter const awaiter{};
+        ConstAwaiter const* seen = nullptr;
+        auto task = awaitsConstLvalue(log, false, awaiter, seen);
+        CHECK(task.done());
+        CHECK(seen == &awaiter);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // final_suspend 不挂起：协程状态自动销毁
 
 auto fireAndForget(EventLog& log, Tracked param)
@@ -1039,6 +1141,7 @@ int main() {
     awaiterExceptionsAreDeliveredIntoTheBody();
     awaitTransformAppliesToCoAwaitOnly();
     operatorCoAwaitIsLookedUpAsMemberThenAdl();
+    lvalueAwaitersAreUsedInPlace();
     notSuspendingAtFinalSuspendDestroysTheCoroutineState();
     finalAwaiterIsResumedWhenFinalSuspendDoesNotSuspend();
     destroyingASuspendedCoroutineRunsDestructorsInStandardOrder();
