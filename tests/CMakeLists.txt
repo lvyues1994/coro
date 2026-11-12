@@ -93,6 +93,26 @@ foreach(co2_test_source IN LISTS co2_contract_violation_test_sources)
                      -P ${CMAKE_CURRENT_SOURCE_DIR}/expect_exit_code.cmake)
 endforeach()
 
+# 编译失败测试：定义 CO2_EXPECT_COMPILE_FAILURE 时源文件必须编不过。同一份源文件不带该
+# 宏的对照目标随正常构建一起编译，证明失败只来自被测的那一处，而不是别的笔误。
+set(co2_compile_fail_test_sources
+    await_inside_switch_compile_fail_test.cpp)
+
+foreach(co2_test_source IN LISTS co2_compile_fail_test_sources)
+    co2_test_target_name("${co2_test_source}" co2_test_target)
+    add_library(${co2_test_target}-control OBJECT ${co2_test_source})
+    co2_configure_test_target(${co2_test_target}-control)
+    add_library(${co2_test_target} OBJECT EXCLUDE_FROM_ALL ${co2_test_source})
+    co2_configure_test_target(${co2_test_target})
+    target_compile_definitions(${co2_test_target} PRIVATE CO2_EXPECT_COMPILE_FAILURE)
+    add_test(NAME ${co2_test_target}
+             COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
+                     --target ${co2_test_target} --config $<CONFIG>)
+    # 这些测试会调用构建工具；串行执行，避免并行 ctest 下同时写构建目录。
+    set_tests_properties(${co2_test_target}
+                         PROPERTIES WILL_FAIL TRUE RESOURCE_LOCK co2-build-tree)
+endforeach()
+
 # 每个公共头文件都必须能单独包含。
 file(GLOB_RECURSE co2_public_headers CONFIGURE_DEPENDS
      "${PROJECT_SOURCE_DIR}/include/co2/*.hpp")

@@ -59,7 +59,8 @@ int main() { return co2::syncWait(twice(21)) == 42 ? 0 : 1; }
 这些差别全部来自"没有编译器"，见 `docs/design/coroutine-core-v2.md` 第 6 节：
 
 - 跨挂起点存活的局部必须写在 `CO2_BEG` 的局部列表里，在帧创建时构造（析构时机与
-  标准一致）；挂起点不能出现在 `try` 块、lambda 或嵌套函数里。
+  标准一致）；挂起点不能出现在 `try` 块、lambda 或嵌套函数里，也不能出现在协程体自己的
+  `switch` 语句里（编译错误：状态机的 `case` 标签会绑到最近一层 switch）。
 - `co_await` 只能是语句或赋值右侧；一行一个挂起点（标签取 `__LINE__`，保证头文件
   里的 inline/模板协程体不违反 ODR）。
 - awaitable 表达式里的**临时对象活不过挂起点**，只有 awaiter 本身被放进帧。awaiter

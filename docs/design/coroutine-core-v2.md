@@ -502,6 +502,12 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
   由帧保活）；这里由 D10 可知临时对象活不过挂起点，所以 `Generator<T>` /
   `AsyncGenerator<T>` 把 prvalue **移进帧内的存储**，恢复时销毁——多一次移动，析构
   时机与标准相同。`Generator<T&>` / `Generator<T const&>` yield 左值时仍只记地址。
+- **D12 `switch` 语句**：挂起点不能出现在协程体自己的 `switch` 语句里——`CO2_AWAIT` /
+  `CO2_YIELD` 展开出的 `case` 标签属于最近一层 switch，写在用户的 switch 里就绑错了
+  地方。状态机的条件类型是没有枚举项的作用域枚举 `detail::SuspendPoint`，标签落进别的
+  switch 时无法隐式转换成那个 switch 的条件类型，因此是**编译错误**
+  （`tests/await_inside_switch_compile_fail_test.cpp`）。需要分支时用 `if`/`else`，或把
+  等待放到 switch 之外。
 
 除此之外的任何差异都应视为缺陷。
 

@@ -54,15 +54,16 @@
                 static_cast<void>(_co2_params);                                        \
             }                                                                          \
             __VA_ARGS__                                                                \
-            CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(4702)                                 \
+            CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(4702 4063)                            \
             ::co2::detail::FrameHeader*                                                \
             operator()(::co2::detail::FrameCore<_co2_promise_type, _co2_capture_pack,  \
                                                 _co2_body>& _co2_context) {            \
                 switch (_co2_context.suspendPoint) {                                   \
-                case 0U:                                                               \
+                case ::co2::detail::SuspendPoint{}:                                    \
                     _co2_context.finishInitialSuspend();
 
 // 状态机在 co_return 之后的 break / 收尾语句对编译器而言不可达（C4702），见 config.hpp。
+// 状态机的 case 值是行号，不是 SuspendPoint 的枚举项（它没有枚举项），MSVC 对此报 C4063。
 #define CO2_END                                                                        \
     break;                                                                             \
     default:                                                                           \
@@ -113,6 +114,11 @@
 // token 序列（__COUNTER__ 会违反 ODR）。
 #define CO2_DETAIL_SUSPEND_POINT_ID __LINE__
 
+// 挂起点编号：行号 + 1（0 留给协程体起点）。类型见 detail::SuspendPoint——标签落进用户
+// 自己的 switch 时无法转换成那个 switch 的条件类型，编译失败。
+#define CO2_DETAIL_SUSPEND_POINT(unique)                                               \
+    static_cast<::co2::detail::SuspendPoint>(static_cast<unsigned>(unique) + 1U)
+
 // [expr.await]：awaitable → (await_transform) → operator co_await → awaiter →
 // await_ready → await_suspend（void / bool / coroutine_handle）→ await_resume。
 // `awaiter_type` 是最终 awaiter 的类型（括号包裹，允许含逗号的模板实参）；
@@ -120,7 +126,7 @@
 #define CO2_DETAIL_AWAIT_IMPL(awaiter_type, resume, awaitable_expression, unique)      \
     do {                                                                               \
         using _co2_awaiter_type = CO2_DETAIL_PP_REMOVE_PARENS_I awaiter_type;          \
-        _co2_context.suspendPoint = static_cast<unsigned>(unique) + 1U;                \
+        _co2_context.suspendPoint = CO2_DETAIL_SUSPEND_POINT(unique);                  \
         if (not _co2_context                                                           \
                     .template emplaceAwaiter<_co2_awaiter_type>(                       \
                         ::co2::detail::getAwaiter(awaitable_expression))               \
@@ -132,7 +138,7 @@
             if (_co2_outcome.suspended) return _co2_outcome.next;                      \
             _co2_context.markRunning();                                                \
         }                                                                              \
-    case static_cast<unsigned>(unique) + 1U:                                           \
+    case CO2_DETAIL_SUSPEND_POINT(unique):                                             \
         resume(_co2_context.template awaiter<_co2_awaiter_type>().await_resume());     \
         _co2_context.resetAwaiter();                                                   \
     } while (false)

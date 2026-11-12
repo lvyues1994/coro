@@ -35,6 +35,12 @@ CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(4702)
 namespace co2 {
 namespace detail {
 
+// 挂起点编号（程序计数器）：0 是协程体起点，其余取自源码行号。它是没有枚举项的作用域
+// 枚举而不是整数：CO2_AWAIT 展开出的 case 标签必须能隐式转换成所在 switch 的条件类型，
+// 而作用域枚举不能隐式转换成任何别的类型——挂起点一旦落进协程体里用户自己的 switch，
+// 就是编译错误，而不是等到恢复时才发现标签绑错了 switch。
+enum class SuspendPoint : unsigned {};
+
 // 帧中与 allocator 无关的部分。Body 的 operator() 以它为上下文，因此每个协程体只
 // 实例化一份 step 逻辑，不随 allocator 变化。
 template <class Promise, class Params, class Body> struct FrameCore {
@@ -47,7 +53,7 @@ template <class Promise, class Params, class Body> struct FrameCore {
     alignas(Params) unsigned char paramsStorage[sizeof(Params)];
     alignas(Body) unsigned char bodyStorage[sizeof(Body)];
     AwaitSlot<> slot;
-    unsigned suspendPoint;
+    SuspendPoint suspendPoint;
     // 局部（Body）在离开协程体作用域时就销毁——co_return、掉出末尾或异常逃出——
     // 早于 final_suspend，与标准一致；destroy() 只销毁仍然存活的那一份。
     bool bodyAlive;
@@ -264,7 +270,7 @@ struct CoroutineFrame {
         ::new (static_cast<void*>(frame->allocatorStorage))
             FrameAllocator{frameAllocator};
         frame->core.prefix.header = FrameHeader{&destroy, &step, false, false};
-        frame->core.suspendPoint = 0U;
+        frame->core.suspendPoint = SuspendPoint{};
         frame->core.bodyAlive = false;
 
         try {
