@@ -29,20 +29,7 @@ template <std::size_t Capacity = CO2_AWAIT_STORAGE_SIZE> struct AwaitSlot {
 
     AwaitSlot() noexcept = default;
 
-    AwaitSlot(AwaitSlot&& other) noexcept {
-        // frame 只会在首次执行前移动，此时不可能存在活动 awaiter。移动已占用的 slot
-        // 需要增加另一种擦除操作，并会削弱该不变量。
-        assert(not other.hasValue());
-        static_cast<void>(other);
-    }
-
-    AwaitSlot& operator=(AwaitSlot&& other) noexcept {
-        if (this == &other) return *this;
-        assert(not hasValue());
-        assert(not other.hasValue());
-        return *this;
-    }
-
+    // 槽随帧一起原地构造、原地销毁，从不搬动：awaiter 可以持有指向自身的指针。
     AwaitSlot(AwaitSlot const&) = delete;
     AwaitSlot& operator=(AwaitSlot const&) = delete;
 

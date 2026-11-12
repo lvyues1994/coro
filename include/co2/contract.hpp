@@ -59,11 +59,3 @@ inline ContractViolationHandler contractViolationHandler() noexcept {
 
 #define CO2_CONTRACT_FAIL(message)                                                     \
     ::co2::detail::reportContractViolation(message, __FILE__, __LINE__)
-
-// 热路径上的内部不变量检查：它们只可能因库自身缺陷失败。NDEBUG 下编译掉，定义
-// CO2_CONTRACT_CHECKS_ALWAYS 可以在发布构建中保留。
-#if defined(NDEBUG) && !defined(CO2_CONTRACT_CHECKS_ALWAYS)
-#define CO2_CONTRACT_ASSERT(condition) static_cast<void>(0)
-#else
-#define CO2_CONTRACT_ASSERT(condition) CO2_CONTRACT_CHECK(condition)
-#endif

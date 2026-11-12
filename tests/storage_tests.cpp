@@ -95,7 +95,7 @@ void awaitSlotFallsBackToTheHeapForLargeAwaiters() {
 
     auto destroyed = 0;
     {
-        auto slot = co2::detail::AwaitSlot<>{};
+        co2::detail::AwaitSlot<> slot;
         auto& stored = slot.emplace<LargeAwaiter>(LargeAwaiter{destroyed});
         CHECK(slot.hasValue());
         CHECK(&slot.get<LargeAwaiter>() == &stored);
