@@ -21,4 +21,5 @@
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
 #include "co2/thread_pool.hpp"
+#include "co2/unstoppable.hpp"
 #include "co2/when_all.hpp"

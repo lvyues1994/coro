@@ -23,6 +23,7 @@
 #include "co2/stop_token.hpp"
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
+#include "co2/unstoppable.hpp"
 #include "co2/when_all.hpp"
 #include "completion_support.hpp"
 #include "sample_errc.hpp"
@@ -471,6 +472,81 @@ void aParentsStopRequestStopsWhenAllThroughItsChildren() {
     CHECK(not reached);
 }
 
+// ---------------------------------------------------------------------------
+// unstoppable：对被包住的操作隐藏停止请求
+
+auto hasAStopToken() CO2_BEG(co2::Task<bool>, (), co2::stop_token token;) {
+    CO2_AWAIT_SET(token, co2::getStopToken());
+    CO2_RETURN(token.stop_possible());
+}
+CO2_END
+
+auto awaitsWithAndWithoutTheToken(bool& plain, bool& shielded)
+    CO2_BEG(co2::Task<int>, (plain, shielded), co2::Task<bool> kept;) {
+    CO2_AWAIT_SET(plain, hasAStopToken());
+    CO2_AWAIT_SET(shielded, co2::unstoppable(hasAStopToken()));
+    if (shielded) CO2_RETURN(-1);
+    kept = hasAStopToken();
+    CO2_AWAIT_SET(shielded, co2::unstoppable(kept)); // 左值同样可以
+    CO2_RETURN(0);
+}
+CO2_END
+
+// 被包住的子 Task 的环境里没有停止令牌。
+void anUnstoppableChildSeesNoStopToken() {
+    co2::stop_source source;
+    auto plain = false;
+    auto shielded = true;
+    CHECK(co2::syncWait(awaitsWithAndWithoutTheToken(plain, shielded),
+                        source.get_token()) == 0);
+    CHECK(plain);
+    CHECK(not shielded);
+}
+
+auto passesAShieldedCancellationPoint(int& passed) CO2_BEG(co2::Task<int>, (passed)) {
+    CO2_AWAIT(co2::unstoppable(co2::stopIfRequested())); // 看不到请求：继续
+    ++passed;
+    CO2_AWAIT(co2::unstoppable(co2::suspend_never{})); // 标准写法的 awaiter 也能包
+    ++passed;
+    CO2_AWAIT(co2::stopIfRequested()); // 没有包住：到此为止
+    ++passed;
+    CO2_RETURN(passed);
+}
+CO2_END
+
+void unstoppableHidesTheRequestFromACancellationPoint() {
+    co2::stop_source source;
+    CHECK(source.request_stop());
+    auto passed = 0;
+    CHECK(not co2::syncWait(passesAShieldedCancellationPoint(passed), source.get_token())
+                  .has_value());
+    CHECK(passed == 2);
+}
+
+auto shields(Leaf leaf, bool& reached)
+    CO2_BEG(co2::Task<int>, (leaf, reached), int value{}; int resumed{};) {
+    CO2_AWAIT_SET(value, co2::unstoppable(chain(0, leaf, resumed, nullptr)));
+    reached = true;
+    CO2_RETURN(value);
+}
+CO2_END
+
+// 它只隐藏外面的停止请求：被包住的操作自己出错或自己停止，照样传出来。
+void unstoppableStillForwardsHowTheOperationEnded() {
+    auto reached = false;
+    CHECK(co2::syncWait(shields(Leaf::returns, reached)) == 1);
+    CHECK(reached);
+
+    reached = false;
+    auto const failure = co2::syncWait(co2::asResult(shields(Leaf::fails, reached)));
+    CHECK(failure->hasError());
+    CHECK(failure->error().exception() == nullptr);
+    CHECK(failure->error().code() == sample::Errc::gone);
+
+    CHECK(co2::syncWait(co2::asResult(shields(Leaf::stops, reached)))->isStopped());
+    CHECK(not reached);
+}
+
 } // namespace
 
 int main() {
@@ -491,5 +567,8 @@ int main() {
     stopIfRequestedIsACancellationPoint();
     stopIfRequestedDoesNothingWithoutAToken();
     aParentsStopRequestStopsWhenAllThroughItsChildren();
+    anUnstoppableChildSeesNoStopToken();
+    unstoppableHidesTheRequestFromACancellationPoint();
+    unstoppableStillForwardsHowTheOperationEnded();
     return 0;
 }
