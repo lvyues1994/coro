@@ -41,6 +41,8 @@ template <class Callback = std::function<void()>> struct stop_callback;
 
 namespace detail {
 
+struct EnvStopToken;
+
 // 侵入式回调节点。invoke 是 noexcept 的 thunk：回调抛出即 std::terminate（标准如此）。
 struct StopCallbackNode {
     void (*invoke)(StopCallbackNode*) noexcept;
@@ -204,6 +206,7 @@ struct stop_token {
     detail::StopState* state{};
 
     friend struct stop_source;
+    friend struct detail::EnvStopToken;
     template <class> friend struct stop_callback;
 };
 
@@ -320,6 +323,57 @@ template <class Callback> struct stop_callback : private detail::StopCallbackNod
 };
 
 namespace detail {
+
+// promise 持有的环境 token：要么自己持有一份引用，要么只借用别人保活的停止状态。
+//
+// 沿等待链继承 token 是每次 co_await 子 Task 都要做的事。拷贝一个 stop_token 是一对原子
+// 引用计数加减；同一棵 Task 树的各个分支在不同线程上各自等待子 Task 时，全都在争用同
+// 一条缓存行。而结构化等待保证父 promise 在子协程运行期间一直存在，子协程只需借用父
+// 的停止状态，不必计数。不能提供这种保证的来源——根 Task 收到的 token、任意 promise 的
+// get_stop_token() 返回值——仍然由本对象持有一份引用。
+//
+// 一个指针宽：停止状态的地址，最低位记"是否持有引用"。
+struct EnvStopToken {
+    EnvStopToken() noexcept = default;
+    EnvStopToken(EnvStopToken const&) = delete;
+    EnvStopToken& operator=(EnvStopToken const&) = delete;
+
+    ~EnvStopToken() { reset(); }
+
+    // 接管 token 的那一份引用。
+    void own(stop_token token) noexcept {
+        reset();
+        if (token.state == nullptr) return;
+        bits = reinterpret_cast<std::uintptr_t>(token.state) | ownedBit;
+        token.state = nullptr;
+    }
+
+    // 借用 other 指向的停止状态，不计引用。前置条件：other——或者它所借用的那个拥有者
+    // ——在本对象被读取期间一直存在。
+    void borrow(EnvStopToken const& other) noexcept {
+        reset();
+        bits = other.bits & ~static_cast<std::uintptr_t>(ownedBit);
+    }
+
+    // 一个独立的、持有引用的 token：交给用户代码、stop_callback 或另起的根。
+    stop_token get() const noexcept { return stop_token{state()}; }
+
+    void reset() noexcept {
+        if ((bits & ownedBit) != 0U) state()->release();
+        bits = 0U;
+    }
+
+  private:
+    enum : std::uintptr_t { ownedBit = 1U };
+
+    StopState* state() const noexcept {
+        static_assert(alignof(StopState) > 1U,
+                      "the low bit of a StopState address must be free for the tag");
+        return reinterpret_cast<StopState*>(bits & ~static_cast<std::uintptr_t>(ownedBit));
+    }
+
+    std::uintptr_t bits{};
+};
 
 // 把一个 token 的停止请求转发给另一个 source：stop_callback<ForwardStop> 就是父子
 // 取消链的一节。

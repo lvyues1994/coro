@@ -49,6 +49,41 @@ stop_token stopTokenOf(coroutine_handle<Promise> const handle) noexcept {
     return stopTokenOfHandle(handle, std::is_void<Promise>{});
 }
 
+// ---- 继承：子协程的环境 token 取自等待它的协程 ----
+//
+// 等待者是 co2 自己的 promise（提供 envStopToken()）时只借用它的停止状态：等待者在子协程
+// 运行期间一直挂着，它的 promise 活得更长，沿链继承因此不碰引用计数。其他 promise 只有
+// get_stop_token() 的返回值可用，没人替那个返回值保活，子协程自己持有一份。
+
+template <class Promise>
+auto inheritFromPromise(EnvStopToken& into, Promise& awaiting, int) noexcept
+    -> decltype(static_cast<EnvStopToken const&>(awaiting.envStopToken()), void()) {
+    into.borrow(awaiting.envStopToken());
+}
+
+template <class Promise>
+void inheritFromPromise(EnvStopToken& into, Promise& awaiting, long) noexcept {
+    into.own(stopTokenOfPromise(awaiting, 0));
+}
+
+template <class Promise>
+void inheritFromHandle(EnvStopToken& into, coroutine_handle<Promise> const awaiting,
+                       std::false_type) noexcept {
+    inheritFromPromise(into, awaiting.promise(), 0);
+}
+
+template <class Promise>
+void inheritFromHandle(EnvStopToken& into, coroutine_handle<Promise>,
+                       std::true_type) noexcept {
+    into.reset();
+}
+
+template <class Promise>
+void inheritStopToken(EnvStopToken& into,
+                      coroutine_handle<Promise> const awaiting) noexcept {
+    inheritFromHandle(into, awaiting, std::is_void<Promise>{});
+}
+
 // co_await getStopToken() 的 awaiter：不挂起，返回 promise 持有的 token。
 struct StopTokenAwaiter {
     stop_token token;

@@ -244,9 +244,40 @@ void laterCallbacksStillRunAfterAnEarlierOneDestroyedTheSource() {
     CHECK(source == nullptr && first == nullptr && second == nullptr);
 }
 
+// promise 持有的环境 token（detail::EnvStopToken）：own 持有一份引用，borrow 只借用同一个
+// 停止状态、不碰引用计数——结构化等待保证被借者活得更长。两种方式读到的 token 相同。
+void environmentTokenOwnsOrBorrowsTheSameState() {
+    co2::stop_source source;
+    co2::detail::EnvStopToken root;
+    CHECK(not root.get().stop_possible());
+
+    root.own(source.get_token());
+    CHECK(root.get() == source.get_token());
+
+    co2::detail::EnvStopToken child;
+    child.borrow(root);
+    CHECK(child.get() == source.get_token());
+    CHECK(not child.get().stop_requested());
+    CHECK(source.request_stop());
+    CHECK(child.get().stop_requested());
+
+    // 借用者放掉时不动状态；拥有者放掉自己的那一份后，其余引用照常有效。
+    child.reset();
+    CHECK(not child.get().stop_possible());
+    root.reset();
+    CHECK(source.stop_requested());
+
+    // 重新指向：先 own 再 borrow，原先持有的那一份被释放。
+    child.own(source.get_token());
+    co2::detail::EnvStopToken empty;
+    child.borrow(empty);
+    CHECK(not child.get().stop_possible());
+}
+
 } // namespace
 
 int main() {
+    environmentTokenOwnsOrBorrowsTheSameState();
     defaultTokenAndNoStopStateSourceCannotBeStopped();
     requestStopSucceedsExactlyOnce();
     callbacksRunOnceOnRequestAndImmediatelyIfAlreadyRequested();

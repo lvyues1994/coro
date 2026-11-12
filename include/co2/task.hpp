@@ -18,7 +18,8 @@
 // 环境：promise 持有一个 stop_token。等待子 Task 时子 promise 从父 promise 继承它
 // （await_suspend 收到的是带类型的 coroutine_handle<ParentPromise>，与 std::execution
 // 的 task 查询父环境的方式相同）；根由 syncWait / spawn 提供。体内用
-// CO2_AWAIT_SET(token, co2::getStopToken()) 读取。
+// CO2_AWAIT_SET(token, co2::getStopToken()) 读取。继承是借用而不是拷贝：父在子运行期间
+// 一直挂着，子 promise 只记下父的停止状态，不碰引用计数（detail::EnvStopToken）。
 //
 // 销毁契约（标准规则）：一个已经启动、尚未完成的 Task 不能销毁——它挂起在某个操作
 // 上，而操作只有完成后才能销毁其状态。co2 把这条未定义行为报告为契约违规。取消是
@@ -67,11 +68,14 @@ template <class T> struct TaskPromise {
 
     // ---- 环境 ----
 
-    stop_token get_stop_token() const noexcept { return stopToken; }
+    stop_token get_stop_token() const noexcept { return stopToken.get(); }
+
+    // 子协程从这里借用，不拷贝 token（见 env.hpp 的 inheritStopToken）。
+    EnvStopToken const& envStopToken() const noexcept { return stopToken; }
 
     // co_await getStopToken()：不挂起，交出本 Task 的 token。
     StopTokenAwaiter await_transform(GetStopToken) noexcept {
-        return StopTokenAwaiter{stopToken};
+        return StopTokenAwaiter{stopToken.get()};
     }
 
     // 其余 awaitable 原样等待（标准：promise 一旦有 await_transform 就必须覆盖全部）。
@@ -90,7 +94,7 @@ template <class T> struct TaskPromise {
     coroutine_handle<> continuation;
     std::exception_ptr error;
     ResultStorage<T> storage;
-    stop_token stopToken;
+    EnvStopToken stopToken; // 根持有引用；被等待的子 Task 借用等待者的
     bool started{};
 };
 
@@ -108,7 +112,7 @@ template <class T> struct TaskAwaiter {
         auto& promise = handle.promise();
         CO2_CONTRACT_CHECK(not promise.started);
         promise.continuation = awaiting;
-        promise.stopToken = stopTokenOf(awaiting);
+        inheritStopToken(promise.stopToken, awaiting);
         promise.started = true;
         return handle;
     }
@@ -206,7 +210,7 @@ struct TaskAccess {
         CO2_CONTRACT_CHECK(task.handle && not task.handle.promise().started);
         auto& promise = task.handle.promise();
         promise.continuation = continuation;
-        promise.stopToken = std::move(token);
+        promise.stopToken.own(std::move(token));
         promise.started = true;
         return task.handle;
     }

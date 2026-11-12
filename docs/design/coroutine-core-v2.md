@@ -861,6 +861,11 @@ cppcoro `async_generator` 的无同步版本：`next()` 返回的 awaiter 记下
 `get_stop_token()` 的 promise（自定义根）给子协程一个 `stop_possible()` 为假的 token；
 类型擦除的 `coroutine_handle<>` 同理。根由 `syncWait(task, token)` 与 `spawn` 提供。
 
+继承不拷贝 token：子 promise 借用父 promise 的停止状态（`detail::EnvStopToken`，
+`env.hpp` 的 `inheritStopToken`）。结构化等待保证父在子运行期间一直存在，所以沿链
+传播没有任何原子引用计数；只有根（`TaskAccess::arm` 收到的 token）和非 co2 promise
+的 `get_stop_token()` 返回值才被持有。
+
 体内读取：`CO2_AWAIT_SET(token, co2::getStopToken())`——`TaskPromise::await_transform(
 GetStopToken)` 返回一个不挂起的 awaiter。为此 `TaskPromise` 有了 `await_transform`，
 按标准规则同时提供了原样转发其余 awaitable 的泛型重载。

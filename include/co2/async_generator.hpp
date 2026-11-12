@@ -83,11 +83,14 @@ template <class T> struct AsyncGeneratorPromise {
 
     // ---- 环境 ----
 
-    stop_token get_stop_token() const noexcept { return stopToken; }
+    stop_token get_stop_token() const noexcept { return stopToken.get(); }
+
+    // 生产者等待的子协程从这里借用，不拷贝 token。
+    EnvStopToken const& envStopToken() const noexcept { return stopToken; }
 
     // co_await getStopToken()：不挂起，交出当前这次 next() 的消费者的 token。
     StopTokenAwaiter await_transform(GetStopToken) noexcept {
-        return StopTokenAwaiter{stopToken};
+        return StopTokenAwaiter{stopToken.get()};
     }
 
     // 其余 awaitable 原样等待（标准：promise 一旦有 await_transform 就必须覆盖全部）。
@@ -106,7 +109,9 @@ template <class T> struct AsyncGeneratorPromise {
     coroutine_handle<> consumer;
     ResultStorage<T> stored;
     std::exception_ptr error;
-    stop_token stopToken;
+    // 每次 next() 重新取自那一次的消费者；消费者在这一步里一直挂着，借用即可。两次
+    // next() 之间它可能已经失效，但那时生产者不在运行，没有人读它。
+    EnvStopToken stopToken;
     bool finished{};
 };
 
@@ -132,7 +137,7 @@ template <class T> struct AsyncGenerator {
             CO2_CONTRACT_CHECK(not promise.consumer);
             promise.stored.reset();
             promise.consumer = consumer;
-            promise.stopToken = detail::stopTokenOf(consumer);
+            detail::inheritStopToken(promise.stopToken, consumer);
             return owner->handle;
         }
 

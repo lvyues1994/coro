@@ -212,6 +212,54 @@ void childTasksInheritTheParentsToken() {
     CHECK(not rootless.stop_possible());
 }
 
+// 自定义的根 promise：get_stop_token() 每次返回一个临时 token，它的 stop_source 随即销毁。
+// 子 Task 沿 co2 自己的 promise 继承时只借用父的停止状态；但这里没有别人替这个返回值
+// 保活，子 Task 必须自己持有一份，否则挂起之后再读就是悬空指针。
+struct ForeignRoot {
+    struct promise_type {
+        ForeignRoot get_return_object() noexcept {
+            return ForeignRoot{co2::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        co2::suspend_never initial_suspend() noexcept { return {}; }
+        co2::suspend_always final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() noexcept { std::terminate(); }
+        co2::stop_token get_stop_token() const { return co2::stop_source{}.get_token(); }
+    };
+    co2::coroutine_handle<promise_type> handle;
+};
+
+auto readsTokenAfterSuspending(co2::ManualExecutor& executor, bool& possible)
+    CO2_BEG(co2::Task<>, (executor, possible), co2::stop_token token;) {
+    CO2_AWAIT(co2::scheduleOn(executor));
+    CO2_AWAIT_SET(token, co2::getStopToken());
+    possible = token.stop_possible();
+}
+CO2_END
+
+auto grandchildReadsToken(co2::ManualExecutor& executor, bool& possible)
+    CO2_BEG(co2::Task<>, (executor, possible)) {
+    CO2_AWAIT(readsTokenAfterSuspending(executor, possible));
+}
+CO2_END
+
+auto foreignRoot(co2::ManualExecutor& executor, bool& possible)
+    CO2_BEG(ForeignRoot, (executor, possible)) {
+    CO2_AWAIT(grandchildReadsToken(executor, possible));
+}
+CO2_END
+
+void descendantsOfAForeignPromiseKeepTheInheritedTokenAlive() {
+    co2::ManualExecutor executor;
+    auto possible = true;
+    auto root = foreignRoot(executor, possible);
+    CHECK(executor.run() == 1U);
+    CHECK(root.handle.done());
+    // 源早已销毁：token 仍然可读，只是不可能再被请求。
+    CHECK(not possible);
+    root.handle.destroy();
+}
+
 void spawnForwardsTheParentsStopRequest() {
     co2::ThreadPool pool{2U};
     co2::stop_source parent;
@@ -254,6 +302,7 @@ int main() {
     requestStopIsObservedThroughGetStopToken();
     droppingAJoinHandleRequestsStopAndDetaches();
     childTasksInheritTheParentsToken();
+    descendantsOfAForeignPromiseKeepTheInheritedTokenAlive();
     spawnForwardsTheParentsStopRequest();
     spawnWithAnAlreadyStoppedParentStartsStopped();
     joinHandlesAreMovable();

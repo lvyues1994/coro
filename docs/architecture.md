@@ -133,6 +133,14 @@ promise（自定义根）与类型擦除的句柄给出 `stop_possible()` 为假
 `AsyncGeneratorPromise` 以同样的方式参与：`next()` 的 awaiter 在 `await_suspend` 里把
 消费者的 token 交给生产者，生产者体内与它等待的子 Task 看到的都是这一份。
 
+继承是**借用**而不是拷贝。promise 里存的是 `detail::EnvStopToken`（一个指针宽）：根 Task
+持有一份引用；被等待的子协程只记下等待者的停止状态，不碰引用计数——等待者在子协程
+运行期间一直挂着，它的 promise 活得更长。这样每次 `co_await` 子 Task 都没有原子操作，
+同一棵 Task 树的分支落在不同线程上时也不会争用停止状态的引用计数（8 线程共享一个
+token 的基准：240 → 20 ns/await）。等待者不是 co2 自己的 promise 时没有这个保证，子
+协程改为持有 `get_stop_token()` 返回值的一份引用。交给用户的 token
+（`getStopToken()`、`fromCallback` 的 initiate 实参）始终是独立的拥有引用。
+
 `stop_source`/`stop_token`/`stop_callback` 与 `[thread.stoptoken]` 逐条一致：一个引用
 计数的状态（`references`/`sources`/`requested` 三个原子量 + 一把互斥锁保护的侵入式
 回调链表）。取消是协作式的：本阶段没有 awaitable 自动响应 stop，Task 体内以
