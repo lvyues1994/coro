@@ -84,7 +84,13 @@ template <class Promise, class Params, class Body> struct FrameCore {
         return slot.template get<Awaiter>();
     }
 
+    // 类型擦除的复位：异常路径不知道槽里是什么。
     void resetAwaiter() noexcept { slot.reset(); }
+
+    // await 正常结束：awaiter 的类型已知，直接析构（平凡析构的内联 awaiter 是空操作）。
+    template <class Awaiter> void resetAwaiterAs() noexcept {
+        slot.template resetAs<Awaiter>();
+    }
 
     // 一经调用 await_suspend，协程即视为挂起；另一线程可以在 await_suspend 返回前
     // 就 resume()。因此生成的代码在调用 await_suspend 之前就清掉 running。
@@ -98,7 +104,7 @@ template <class Promise, class Params, class Body> struct FrameCore {
     // 发生在 ramp 里，由 runRamp 销毁帧并抛给调用方。
     void finishInitialSuspend() {
         awaiter<InitialAwaiter>().await_resume();
-        resetAwaiter();
+        resetAwaiterAs<InitialAwaiter>();
     }
 
     // 掉出协程末尾：有 return_void 就调用它；没有时标准是未定义行为，这里报告契约违规。

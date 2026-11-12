@@ -110,6 +110,56 @@ void awaitSlotFallsBackToTheHeapForLargeAwaiters() {
     CHECK(destroyed == 1);
 }
 
+struct SmallTrackedAwaiter {
+    explicit SmallTrackedAwaiter(int& destroyed_) noexcept : destroyed{&destroyed_} {}
+    SmallTrackedAwaiter(SmallTrackedAwaiter&& other) noexcept
+        : destroyed{other.destroyed} {
+        other.destroyed = nullptr;
+    }
+    ~SmallTrackedAwaiter() {
+        if (destroyed != nullptr) ++*destroyed;
+    }
+
+    int* destroyed;
+};
+
+// 类型已知的复位：await 正常结束时宏知道 awaiter 的类型，直接析构，不经函数指针；内联且
+// 平凡析构的 awaiter 根本不登记析构，复位是空操作。类型擦除的 reset() 留给异常与
+// destroy() 路径，两者可以混用。
+void awaitSlotTypedResetDestroysExactlyOnce() {
+    static_assert(co2::detail::AwaitSlot<>::isInline<SmallTrackedAwaiter>(),
+                  "the small awaiter stays inline");
+    auto destroyed = 0;
+    co2::detail::AwaitSlot<> slot;
+
+    slot.emplace<SmallTrackedAwaiter>(SmallTrackedAwaiter{destroyed});
+    CHECK(slot.hasValue());
+    slot.resetAs<SmallTrackedAwaiter>();
+    CHECK(destroyed == 1);
+    CHECK(not slot.hasValue());
+    slot.reset(); // 已经复位：空操作
+    CHECK(destroyed == 1);
+
+    slot.emplace<LargeAwaiter>(LargeAwaiter{destroyed}); // 堆回落
+    slot.resetAs<LargeAwaiter>();
+    CHECK(destroyed == 2);
+    CHECK(not slot.hasValue());
+
+    // 平凡析构的内联 awaiter 没有需要登记的析构：槽在它之后可以直接复用。
+    slot.emplace<int>(7);
+    CHECK(slot.get<int>() == 7);
+    CHECK(not slot.hasValue());
+    slot.resetAs<int>();
+    slot.emplace<int>(8);
+    CHECK(slot.get<int>() == 8);
+    slot.reset();
+
+    // 类型擦除的 reset() 仍然销毁需要析构的 awaiter。
+    slot.emplace<SmallTrackedAwaiter>(SmallTrackedAwaiter{destroyed});
+    slot.reset();
+    CHECK(destroyed == 3);
+}
+
 struct alignas(64) OverAlignedAwaiter {
     explicit OverAlignedAwaiter(int& destroyed_) noexcept : destroyed{&destroyed_} {}
     OverAlignedAwaiter(OverAlignedAwaiter&& other) noexcept
@@ -248,6 +298,7 @@ void moveOnlyFunctionAcceptsMoveOnlyCallables() {
 int main() {
     resultStorageOwnsExactlyOneValue();
     awaitSlotFallsBackToTheHeapForLargeAwaiters();
+    awaitSlotTypedResetDestroysExactlyOnce();
     awaitSlotAlignsOverAlignedAwaitersOnTheHeap();
     moveOnlyFunctionLayoutAndInlineBoundary();
     moveOnlyFunctionOwnsItsCallableInBothStorages();

@@ -145,7 +145,7 @@
         }                                                                              \
     case CO2_DETAIL_SUSPEND_POINT(unique):                                             \
         resume(_co2_context.template awaiter<_co2_awaiter_type>().await_resume());     \
-        _co2_context.resetAwaiter();                                                   \
+        _co2_context.template resetAwaiterAs<_co2_awaiter_type>();                     \
     } while (false)
 
 // co_await e：经过 await_transform。
