@@ -721,6 +721,35 @@ void explicitAllocatorIsUsedForTheFrame() {
 }
 
 // ---------------------------------------------------------------------------
+// 参数副本：by-value 参数直接移动进帧，恰好一次（[dcl.fct.def.coroutine]/13）。
+
+struct MoveCounter {
+    explicit MoveCounter(int& moves_) noexcept : moves{&moves_} {}
+    MoveCounter(MoveCounter&& other) noexcept : moves{other.moves} { ++*moves; }
+    MoveCounter(MoveCounter const&) = delete;
+    MoveCounter& operator=(MoveCounter const&) = delete;
+    MoveCounter& operator=(MoveCounter&&) = delete;
+    int* moves;
+};
+
+auto takesByValue(EventLog& log, bool lazy, MoveCounter counter)
+    CO2_BEG(T::VoidTask, (log, lazy, counter)) {
+    static_cast<void>(counter);
+    CO2_RETURN();
+}
+CO2_END
+
+void byValueParametersAreMovedIntoTheFrameExactlyOnce() {
+    EventLog log;
+    auto moves = 0;
+    auto task = takesByValue(log, true, MoveCounter{moves});
+    CHECK(moves == 1);
+    task.resume();
+    CHECK(task.done());
+    CHECK(moves == 1);
+}
+
+// ---------------------------------------------------------------------------
 // 超对齐的帧：局部的对齐要求超过 alignof(std::max_align_t) 时，C++14 的 operator new、
 // std::allocator 与 promise 的 operator new(size) 都拿不到对齐参数。帧在三条分配路径上
 // 都必须手工对齐，释放时归还的字节数与分配时一致。
@@ -860,6 +889,7 @@ int main() {
     handleRoundTripsThroughPromiseAndAddress();
     promiseOperatorNewAndAllocationFailureAreHonored();
     explicitAllocatorIsUsedForTheFrame();
+    byValueParametersAreMovedIntoTheFrameExactlyOnce();
     overAlignedFramesAreAlignedOnEveryAllocationPath();
     localsAndReferenceParametersSurviveSuspension();
 }

@@ -28,6 +28,10 @@
 
 // 参数副本（_co2_capture_pack）与局部（_co2_body）是帧里两个独立的对象，这样销毁
 // 顺序才能与标准一致：局部 → promise → 参数副本。
+//
+// 参数副本由 _co2_make_params 直接在帧里构造：它按引用捕获函数参数，等帧分配好之后才
+// 把 by-value 参数移动进去——与标准一样恰好一次移动，中间没有栈上的副本。allocator
+// 表达式在此之前求值。
 #define CO2_DETAIL_BEG_IMPL(return_type, allocator, captures, ...)                     \
     ->CO2_DETAIL_PP_REMOVE_PARENS(return_type) {                                       \
         using _co2_return_type = CO2_DETAIL_PP_REMOVE_PARENS(return_type);             \
@@ -44,8 +48,10 @@
                                  captures)::co2::detail::NoMoreParams{});              \
             }                                                                          \
         };                                                                             \
-        _co2_capture_pack _co2_captures{                                               \
-            CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_FORWARD, captures)};       \
+        auto const _co2_make_params = [&](void* const _co2_at) {                       \
+            ::new (_co2_at) _co2_capture_pack{                                         \
+                CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_FORWARD, captures)};   \
+        };                                                                             \
         struct _co2_body final : ::co2::detail::BodyBase {                             \
             CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_REF, captures)             \
             explicit _co2_body(_co2_capture_pack& _co2_params)                         \
@@ -76,8 +82,8 @@
         }                                                                              \
         ;                                                                              \
         return ::co2::detail::startCoroutine<_co2_return_type, _co2_promise_type,      \
-                                             _co2_body>(std::move(_co2_captures),      \
-                                                        _co2_allocator);               \
+                                             _co2_body, _co2_capture_pack>(            \
+            _co2_make_params, _co2_allocator);                                         \
         }
 
 #define CO2_DETAIL_BEG_WITH_LOCALS(return_type, captures, ...)                         \

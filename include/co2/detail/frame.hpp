@@ -343,8 +343,10 @@ struct CoroutineFrame {
     alignas(FrameAllocator) unsigned char allocatorStorage[sizeof(FrameAllocator)];
 
     // 分配并初始化帧：参数副本 → promise（能用参数副本构造就传入）→ 局部（Body）。
+    // `makeParams(void*)` 在给定地址上构造参数副本：帧先分配，参数再直接移动进去。
     // 返回空表示分配失败且 promise 提供了 get_return_object_on_allocation_failure。
-    static CoroutineFrame* create(Params params, Allocator const& allocator) {
+    template <class MakeParams>
+    static CoroutineFrame* create(MakeParams&& makeParams, Allocator const& allocator) {
         static_assert(
             std::is_standard_layout<CoroutineFrame>::value,
             "the coroutine frame must stay standard-layout so that the header, "
@@ -362,8 +364,7 @@ struct CoroutineFrame {
         frame->core.bodyAlive = false;
 
         try {
-            ::new (static_cast<void*>(frame->core.paramsStorage))
-                Params(std::move(params));
+            makeParams(static_cast<void*>(frame->core.paramsStorage));
         } catch (...) {
             release(frame);
             throw;
@@ -513,11 +514,14 @@ Return startCoroutineWith(CoroutineFrame<Promise, Params, Body, Allocator>* cons
     return runRamp<Return>(*frame);
 }
 
-template <class Return, class Promise, class Body, class Params, class Allocator>
-Return startCoroutine(Params params, Allocator const& allocator) {
+// `makeParams(void*)` 在帧内给定的地址上构造 Params（宏生成：把函数参数转发进去）。
+template <class Return, class Promise, class Body, class Params, class MakeParams,
+          class Allocator>
+Return startCoroutine(MakeParams&& makeParams, Allocator const& allocator) {
     using Frame = CoroutineFrame<Promise, Params, Body, Allocator>;
-    return startCoroutineWith<Return>(Frame::create(std::move(params), allocator),
-                                      typename Frame::HasFailureObject{});
+    return startCoroutineWith<Return>(
+        Frame::create(std::forward<MakeParams>(makeParams), allocator),
+        typename Frame::HasFailureObject{});
 }
 
 } // namespace detail
