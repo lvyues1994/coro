@@ -12,7 +12,8 @@ set(co2_test_sources
     allocation_tests.cpp
     edge_case_tests.cpp
     vocabulary_tests.cpp
-    completion_tests.cpp)
+    completion_tests.cpp
+    completion_components_tests.cpp)
 
 # 契约违规测试：程序在预期的失败点经由契约处理器以退出码 86 结束。
 set(co2_contract_violation_test_sources

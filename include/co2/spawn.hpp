@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "co2/completion.hpp"
 #include "co2/contract.hpp"
 #include "co2/coroutine_handle.hpp"
 #include "co2/detail/late_init.hpp"
@@ -24,6 +25,9 @@
 // 的 JoinHandle 析构只是销毁帧。
 //
 // 完成时等待中的协程在完成线程上被对称转移恢复（标准行为）；join() 阻塞调用线程。
+//
+// 三种完成方式：在协程里等待 JoinHandle 时，被 spawn 的 Task 出错或已停止，等待它的
+// 协程以同样的结果结束；join() 对已停止返回空的 optional，出错时抛出。
 
 namespace co2 {
 
@@ -113,6 +117,9 @@ template <class T> struct JoinAwaiter {
     }
 
     T await_resume() { return TaskAccess::takeResult(*task); }
+
+    // 被 spawn 的 Task 出错或已停止：等待它的协程以同样的结果结束。
+    Completion await_completion() noexcept { return TaskAccess::completionOf(*task); }
 };
 
 } // namespace detail
@@ -179,6 +186,8 @@ template <class T> struct JoinHandle {
     }
 
     T await_resume() { return awaiter().await_resume(); }
+
+    Completion await_completion() noexcept { return awaiter().await_completion(); }
 
     detail::JoinAwaiter<T> operator_co_await() & noexcept { return awaiter(); }
 
