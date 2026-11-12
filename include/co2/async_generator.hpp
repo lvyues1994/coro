@@ -7,6 +7,8 @@
 #include "co2/contract.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/detail/result_storage.hpp"
+#include "co2/env.hpp"
+#include "co2/stop_token.hpp"
 
 // co2：异步生成器。生产者体内可以 CO2_AWAIT，也可以 CO2_YIELD；消费者：
 //
@@ -15,6 +17,10 @@
 // 每一步都是生产者与消费者之间的对称转移：next() 记下消费者并转移进生产者；生产者
 // yield（或结束）时转移回消费者。同一时刻只有一方在运行，因此没有任何同步——消费者
 // 在生产者 yield 所在的线程上恢复，与 cppcoro::async_generator 一致。
+//
+// 环境：生产者属于消费者的等待链。每次 next() 把消费者的 stop_token 交给生产者的
+// promise，生产者体内 CO2_AWAIT_SET(token, co2::getStopToken()) 读到它，生产者等待的子
+// Task 也从这里继承——与 Task 等待子 Task 的传播方式相同。
 //
 // 销毁契约：有 next() 未完成时（生产者正在运行或挂起在某个操作上）不能销毁；停在
 // yield 点或从未启动时可以随时销毁。
@@ -75,6 +81,21 @@ template <class T> struct AsyncGeneratorPromise {
 
     void unhandled_exception() noexcept { error = std::current_exception(); }
 
+    // ---- 环境 ----
+
+    stop_token get_stop_token() const noexcept { return stopToken; }
+
+    // co_await getStopToken()：不挂起，交出当前这次 next() 的消费者的 token。
+    StopTokenAwaiter await_transform(GetStopToken) noexcept {
+        return StopTokenAwaiter{stopToken};
+    }
+
+    // 其余 awaitable 原样等待（标准：promise 一旦有 await_transform 就必须覆盖全部）。
+    template <class Awaitable>
+    Awaitable&& await_transform(Awaitable&& awaitable) noexcept {
+        return std::forward<Awaitable>(awaitable);
+    }
+
     coroutine_handle<> takeConsumer() noexcept {
         auto const pending = consumer;
         CO2_CONTRACT_CHECK(pending);
@@ -85,6 +106,7 @@ template <class T> struct AsyncGeneratorPromise {
     coroutine_handle<> consumer;
     ResultStorage<T> stored;
     std::exception_ptr error;
+    stop_token stopToken;
     bool finished{};
 };
 
@@ -102,11 +124,15 @@ template <class T> struct AsyncGenerator {
         }
 
         // 记下消费者，转移进生产者（首次：从初始挂起点启动；之后：从 yield 点继续）。
-        coroutine_handle<> await_suspend(coroutine_handle<> const consumer) noexcept {
+        // 带类型的消费者句柄：生产者在这一步里使用这个消费者的环境。
+        template <class ConsumerPromise>
+        coroutine_handle<>
+        await_suspend(coroutine_handle<ConsumerPromise> const consumer) noexcept {
             auto& promise = owner->handle.promise();
             CO2_CONTRACT_CHECK(not promise.consumer);
             promise.stored.reset();
             promise.consumer = consumer;
+            promise.stopToken = detail::stopTokenOf(consumer);
             return owner->handle;
         }
 

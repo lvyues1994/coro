@@ -119,6 +119,8 @@ ParentPromise>)` 让子 promise 从父 promise 的 `get_stop_token()` 继承；�
 promise（自定义根）与类型擦除的句柄给出 `stop_possible()` 为假的 token。根由
 `syncWait(task, token)` 与 `spawn` 提供。体内 `CO2_AWAIT_SET(t, getStopToken())` 经
 `TaskPromise::await_transform(GetStopToken)` 读取（其余 awaitable 由泛型重载原样转发）。
+`AsyncGeneratorPromise` 以同样的方式参与：`next()` 的 awaiter 在 `await_suspend` 里把
+消费者的 token 交给生产者，生产者体内与它等待的子 Task 看到的都是这一份。
 
 `stop_source`/`stop_token`/`stop_callback` 与 `[thread.stoptoken]` 逐条一致：一个引用
 计数的状态（`references`/`sources`/`requested` 三个原子量 + 一把互斥锁保护的侵入式

@@ -269,6 +269,47 @@ void asyncGeneratorConsumerFollowsTheProducerAcrossThreads() {
     CHECK(threads.count(std::this_thread::get_id()) == 0U);
 }
 
+// AsyncGenerator 的生产者属于消费者的等待链：生产者体内读到的、以及它等待的子 Task
+// 继承到的 stop_token，都是发起这次 next() 的消费者的 token。
+
+auto reportsStopRequested() CO2_BEG(co2::Task<bool>, (), co2::stop_token token;) {
+    CO2_AWAIT_SET(token, co2::getStopToken());
+    CO2_RETURN(token.stop_requested());
+}
+CO2_END
+
+auto observesToken(std::vector<bool>& possible)
+    CO2_BEG(co2::AsyncGenerator<int>, (possible), co2::stop_token token;
+            bool childSawStop{};) {
+    CO2_AWAIT_SET(token, co2::getStopToken());
+    possible.push_back(token.stop_possible());
+    CO2_YIELD(token.stop_requested() ? 1 : 0);
+    CO2_AWAIT_SET(childSawStop, reportsStopRequested());
+    CO2_YIELD(childSawStop ? 1 : 0);
+}
+CO2_END
+
+auto consumesObserved(co2::stop_source& source, std::vector<bool>& possible)
+    CO2_BEG(co2::Task<int>, (source, possible), co2::AsyncGenerator<int> stream;
+            bool has{}; int beforeStop{}; int afterStop{};) {
+    stream = observesToken(possible);
+    CO2_AWAIT_SET(has, stream.next());
+    beforeStop = has ? stream.value() : -1;
+    source.request_stop();
+    CO2_AWAIT_SET(has, stream.next());
+    afterStop = has ? stream.value() : -1;
+    CO2_RETURN(beforeStop * 10 + afterStop);
+}
+CO2_END
+
+void asyncGeneratorProducerInheritsTheConsumersStopToken() {
+    co2::stop_source source;
+    std::vector<bool> possible;
+    // 第一个元素在请求停止之前产生（0），第二个由子 Task 在请求之后观察到（1）。
+    CHECK(co2::syncWait(consumesObserved(source, possible), source.get_token()) == 1);
+    CHECK(possible.size() == 1U && possible[0]);
+}
+
 // ---------------------------------------------------------------------------
 // stop_token 生命周期边界
 
@@ -412,6 +453,7 @@ int main() {
     explicitValueTypeCopiesOnlyWhenTheConsumerAsks();
     constRvaluesYieldedByConstReferenceAreKeptAlive();
     asyncGeneratorConsumerFollowsTheProducerAcrossThreads();
+    asyncGeneratorProducerInheritsTheConsumersStopToken();
     tokensAndCallbacksOutliveTheirSource();
     requestAfterEveryTokenIsGoneIsStillWellDefined();
     syncWaitAcceptsBareAwaiters();

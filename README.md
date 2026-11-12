@@ -205,7 +205,8 @@ co2::spawn(pool, work(), parentToken);           // 父 token 的停止请求转
 
 token 沿 Task 树传播：`syncWait`/`spawn` 提供根 token，子 Task 从父 promise 继承
 （等待者的 `await_suspend` 收到带类型的父句柄，与 `std::execution::task` 查询父环境
-的方式相同）。体内读取：
+的方式相同）。`AsyncGenerator` 的生产者同样在这条链上：每次 `next()` 使用发起它的
+消费者的 token。体内读取：
 
 ```cpp
 auto loop(co2::ThreadPool& pool) CO2_BEG(co2::Task<>, (pool), co2::stop_token token;) {
