@@ -48,6 +48,63 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 120
 
+  # 库的最低要求是 C++14（上面的 build 作业）。这里用更新的标准把测试再编一遍、跑一遍：
+  # 新标准带来的规则变化（弃用、C++20 的圆括号聚合初始化……）要在这里暴露，而不是在
+  # 使用者那里。
+  standards:
+    name: ${{ matrix.compiler }} C++${{ matrix.std }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        std: [17, 20, 23]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
+            -DCO2_TEST_CXX_STANDARD=${{ matrix.std }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+  libcxx:
+    name: clang++ libc++ C++20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang libc++-dev libc++abi-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+            -DCO2_TEST_CXX_STANDARD=20
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
   msvc:
     name: MSVC ${{ matrix.toolset }} ${{ matrix.build_type }}
     runs-on: ${{ matrix.os }}
@@ -77,20 +134,25 @@ jobs:
         run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --timeout 120
 
   asan:
-    name: ASan + UBSan
+    name: ASan + UBSan (${{ matrix.compiler }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build clang
 
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
 
       - name: Build
@@ -124,6 +186,15 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 300
+        env:
+          TSAN_OPTIONS: second_deadlock_stack=1
+
+      # 并发用例再重复跑几轮：丢唤醒、数据竞争这类问题一次运行未必碰得到。
+      - name: Stress the concurrent tests
+        run: |
+          ctest --test-dir build --output-on-failure --timeout 300 \
+            -R "thread-pool|when-all|spawn|callback|edge-case|scheduler" \
+            --repeat until-fail:5
         env:
           TSAN_OPTIONS: second_deadlock_stack=1
 

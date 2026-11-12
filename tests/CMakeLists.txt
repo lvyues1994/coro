@@ -23,12 +23,16 @@ set(co2_contract_violation_test_sources
     async_generator_destroy_contract_violation_test.cpp
     continuation_twice_contract_violation_test.cpp)
 
+# 构建测试用的 C++ 标准。库的最低要求是 14，默认就测它；CI 另以 17 / 20 / 23 各跑一遍，
+# 保证较新的标准下（弃用告警、更严格的规则）同样干净。
+set(CO2_TEST_CXX_STANDARD 14 CACHE STRING "C++ standard used to build the co2 tests")
+
 function(co2_configure_test_target target)
     target_link_libraries(${target} PRIVATE co2::co2)
     set_target_properties(
         ${target}
         PROPERTIES
-            CXX_STANDARD 14
+            CXX_STANDARD ${CO2_TEST_CXX_STANDARD}
             CXX_STANDARD_REQUIRED YES
             CXX_EXTENSIONS NO)
 
@@ -126,7 +130,9 @@ if("cxx_std_20" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
         co2_test_target_name("${co2_cpp20_source}" co2_test_target)
         add_executable(${co2_test_target} ${co2_cpp20_source})
         co2_configure_test_target(${co2_test_target})
-        set_target_properties(${co2_test_target} PROPERTIES CXX_STANDARD 20)
+        if(CO2_TEST_CXX_STANDARD LESS 20)
+            set_target_properties(${co2_test_target} PROPERTIES CXX_STANDARD 20)
+        endif()
         add_test(NAME ${co2_test_target} COMMAND ${co2_test_target})
     endforeach()
 endif()
