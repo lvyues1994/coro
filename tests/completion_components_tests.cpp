@@ -547,6 +547,84 @@ void unstoppableStillForwardsHowTheOperationEnded() {
     CHECK(not reached);
 }
 
+// ---------------------------------------------------------------------------
+// scheduleOn 是取消点：hop 之后，等待者的停止令牌上有请求就以已停止结束
+
+auto hopsForever(co2::Scheduler& scheduler, int& hops)
+    CO2_BEG(co2::Task<int>, (scheduler, hops)) {
+    for (;;) {
+        CO2_AWAIT(co2::scheduleOn(scheduler));
+        ++hops;
+    }
+}
+CO2_END
+
+void aHoppingTaskStopsAtItsNextHop() {
+    co2::ManualExecutor executor;
+    auto hops = 0;
+    auto handle = co2::spawn(executor, hopsForever(executor, hops));
+    CHECK(executor.runOne()); // 启动，第一次 hop 排进队列
+    CHECK(executor.runOne()); // hop 回来：没有停止请求，继续
+    CHECK(hops == 1);
+    CHECK(not handle.isReady());
+
+    CHECK(handle.requestStop());
+    CHECK(executor.runOne()); // 检查发生在 hop 之后：这一次 hop 照常执行，回来时结束
+    CHECK(hops == 1);
+    CHECK(handle.isReady());
+    CHECK(executor.pending() == 0U);
+    CHECK(not handle.join().has_value());
+}
+
+auto finishesItsCleanup(co2::Scheduler& scheduler, bool& cleanedUp)
+    CO2_BEG(co2::Task<int>, (scheduler, cleanedUp)) {
+    CO2_AWAIT(co2::unstoppable(co2::scheduleOn(scheduler))); // 收尾阶段：不被取消
+    cleanedUp = true;
+    CO2_AWAIT(co2::scheduleOn(scheduler)); // 普通的 hop：取消点
+    CO2_RETURN(1);
+}
+CO2_END
+
+void anUnstoppableHopIsNotACancellationPoint() {
+    co2::ManualExecutor executor;
+    auto cleanedUp = false;
+    auto handle = co2::spawn(executor, finishesItsCleanup(executor, cleanedUp));
+    CHECK(handle.requestStop());
+    CHECK(executor.run() == 3U); // 启动、第一次 hop、第二次 hop
+    CHECK(cleanedUp);
+    CHECK(not handle.join().has_value());
+}
+
+// 只转发标准三个成员的包装 awaiter。
+struct ForwardsTheHop {
+    co2::ScheduleOn hop;
+
+    bool await_ready() const noexcept { return hop.await_ready(); }
+
+    template <class Promise>
+    void await_suspend(co2::coroutine_handle<Promise> const awaiting) noexcept {
+        hop.await_suspend(awaiting);
+    }
+
+    void await_resume() const noexcept { hop.await_resume(); }
+};
+
+auto hopsThroughAWrapper(co2::Scheduler& scheduler)
+    CO2_BEG(co2::Task<int>, (scheduler)) {
+    CO2_AWAIT(ForwardsTheHop{co2::scheduleOn(scheduler)});
+    CO2_RETURN(1);
+}
+CO2_END
+
+// 不认识 await_completion() 的调用方不被取消：hop 照常完成，协程继续。
+void aCallerThatSkipsAwaitCompletionIsNotCancelledByAHop() {
+    co2::ManualExecutor executor;
+    auto handle = co2::spawn(executor, hopsThroughAWrapper(executor));
+    CHECK(handle.requestStop());
+    CHECK(executor.run() == 2U);
+    CHECK(handle.join() == 1);
+}
+
 } // namespace
 
 int main() {
@@ -570,5 +648,8 @@ int main() {
     anUnstoppableChildSeesNoStopToken();
     unstoppableHidesTheRequestFromACancellationPoint();
     unstoppableStillForwardsHowTheOperationEnded();
+    aHoppingTaskStopsAtItsNextHop();
+    anUnstoppableHopIsNotACancellationPoint();
+    aCallerThatSkipsAwaitCompletionIsNotCancelledByAHop();
     return 0;
 }

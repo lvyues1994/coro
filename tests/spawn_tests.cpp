@@ -24,6 +24,7 @@
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
 #include "co2/thread_pool.hpp"
+#include "co2/unstoppable.hpp"
 
 namespace {
 
@@ -167,13 +168,15 @@ void awaitingAnAlreadyCompletedHandleDoesNotSuspend() {
 // ---------------------------------------------------------------------------
 // stop_token：请求、观察、传播
 
+// 自己轮询令牌、自己决定什么时候结束。scheduleOn 是取消点，所以这里的 hop 用
+// unstoppable 包住：否则协程会在 hop 回来时就以已停止结束，走不到下面的 CO2_RETURN。
 auto spinUntilStopped(co2::ThreadPool& pool)
     CO2_BEG(co2::Task<int>, (pool), co2::stop_token token; int hops{};) {
     CO2_AWAIT_SET(token, co2::getStopToken());
     CHECK(token.stop_possible());
     while (not token.stop_requested()) {
         ++hops;
-        CO2_AWAIT(co2::scheduleOn(pool));
+        CO2_AWAIT(co2::unstoppable(co2::scheduleOn(pool)));
     }
     CO2_RETURN(hops);
 }
@@ -187,6 +190,23 @@ void requestStopIsObservedThroughGetStopToken() {
     CHECK(handle.requestStop());
     CHECK(handle.getStopToken().stop_requested());
     CHECK(handle.join() >= 0);
+}
+
+auto hopsForever(co2::ThreadPool& pool) CO2_BEG(co2::Task<int>, (pool)) {
+    for (;;)
+        CO2_AWAIT(co2::scheduleOn(pool));
+}
+CO2_END
+
+// 不轮询也能取消：scheduleOn 是取消点，停止请求之后的下一次 hop 回来时 Task 以已停止
+// 结束，join() 返回空的 optional。
+void requestStopEndsAHoppingTaskAtItsNextHop() {
+    co2::ThreadPool pool{2U};
+    auto handle = co2::spawn(pool, hopsForever(pool));
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    CHECK(not handle.isReady());
+    CHECK(handle.requestStop());
+    CHECK(not handle.join().has_value());
 }
 
 auto guardedSpin(co2::ThreadPool& pool, std::atomic<int>& destroyed)
@@ -205,7 +225,8 @@ void droppingAJoinHandleRequestsStopAndDetaches() {
         co2::ThreadPool pool{2U};
         for (int i = 0; i < 8; ++i)
             co2::spawn(pool, guardedSpin(pool, destroyed));
-        // 句柄已全部丢弃：每个 Task 收到停止请求、跑完、帧被销毁——线程池析构会排空。
+        // 句柄已全部丢弃：每个 Task 收到停止请求，在下一次 hop 回来时以已停止结束，帧被
+        // 销毁——线程池析构会排空。
     }
     CHECK(destroyed.load() == 8);
 }
@@ -338,6 +359,7 @@ int main() {
     joinHandlesAreAwaitable();
     awaitingAnAlreadyCompletedHandleDoesNotSuspend();
     requestStopIsObservedThroughGetStopToken();
+    requestStopEndsAHoppingTaskAtItsNextHop();
     droppingAJoinHandleRequestsStopAndDetaches();
     childTasksInheritTheParentsToken();
     descendantsOfAForeignPromiseKeepTheInheritedTokenAlive();

@@ -338,6 +338,9 @@ struct EnvStopToken {
     EnvStopToken(EnvStopToken const&) = delete;
     EnvStopToken& operator=(EnvStopToken const&) = delete;
 
+    // 交出自己的那一份引用（或借用关系），变成空的。带着它的 awaiter 靠这个被搬进帧。
+    EnvStopToken(EnvStopToken&& other) noexcept : bits{other.bits} { other.bits = 0U; }
+
     ~EnvStopToken() { reset(); }
 
     // 接管 token 的那一份引用。
