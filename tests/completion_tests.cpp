@@ -16,6 +16,11 @@
 #include "co2/completion.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/error.hpp"
+#include "co2/manual_executor.hpp"
+#include "co2/optional.hpp"
+#include "co2/spawn.hpp"
+#include "co2/sync_wait.hpp"
+#include "co2/task.hpp"
 #include "sample_errc.hpp"
 
 namespace {
@@ -398,6 +403,186 @@ void aCapturedExceptionReachesAStandardPromiseUnchanged() {
     CHECK(sawOriginal);
 }
 
+// ---------------------------------------------------------------------------
+// Task：错误与已停止按值沿等待链向上传，只在根上变回异常或空的 optional
+
+struct ExpectedError : std::runtime_error {
+    ExpectedError() : std::runtime_error{"expected"} {}
+};
+
+enum class Leaf { returns, fails, stops, throws };
+
+// 记下每一层的局部是按什么顺序析构的。
+struct DepthGuard {
+    std::vector<int>* order{};
+    int depth{};
+    ~DepthGuard() {
+        if (order != nullptr) order->push_back(depth);
+    }
+};
+
+// 一条 depth + 1 层的等待链：最里面一层按 leaf 结束，外面每一层等待里面一层、把结果
+// 加一。`resumed` 数的是有多少层在等待之后继续执行了。
+auto chain(int depth, Leaf leaf, int& resumed, std::vector<int>* order)
+    CO2_BEG(co2::Task<int>, (depth, leaf, resumed, order), int value{};
+            DepthGuard guard;) {
+    guard.order = order;
+    guard.depth = depth;
+    if (depth == 0) {
+        if (leaf == Leaf::throws) throw ExpectedError{};
+        if (leaf == Leaf::fails) CO2_AWAIT(Ends{failed()});
+        if (leaf == Leaf::stops) CO2_AWAIT(Ends{stopped()});
+        CO2_RETURN(1);
+    }
+    CO2_AWAIT_SET(value, chain(depth - 1, leaf, resumed, order));
+    ++resumed;
+    CO2_RETURN(value + 1);
+}
+CO2_END
+
+void valuesStillFlowThroughTheChain() {
+    auto resumed = 0;
+    CHECK(co2::syncWait(chain(3, Leaf::returns, resumed, nullptr)) == 4);
+    CHECK(resumed == 3);
+}
+
+void anErrorPassesThroughEveryLayerAndIsThrownAtTheRoot() {
+    auto resumed = 0;
+    auto order = std::vector<int>{};
+    auto sawCode = false;
+    try {
+        co2::syncWait(chain(3, Leaf::fails, resumed, &order));
+    } catch (std::system_error const& exception) {
+        sawCode = exception.code() == sample::Errc::gone;
+    }
+    CHECK(sawCode);
+    CHECK(resumed == 0); // 没有一层在等待之后继续执行
+    auto const innerFirst = std::vector<int>{0, 1, 2, 3};
+    CHECK(order == innerFirst); // 局部由内向外析构
+}
+
+void aStoppedTaskEndsEveryAwaiterAndTheRootReturnsEmpty() {
+    auto resumed = 0;
+    auto order = std::vector<int>{};
+    auto const result = co2::syncWait(chain(3, Leaf::stops, resumed, &order));
+    CHECK(not result.has_value());
+    CHECK(resumed == 0);
+    auto const innerFirst = std::vector<int>{0, 1, 2, 3};
+    CHECK(order == innerFirst);
+}
+
+void anExceptionIsRethrownUnchangedAtTheRoot() {
+    auto resumed = 0;
+    auto sawOriginal = false;
+    try {
+        co2::syncWait(chain(3, Leaf::throws, resumed, nullptr));
+    } catch (ExpectedError const&) {
+        sawOriginal = true;
+    }
+    CHECK(sawOriginal);
+    CHECK(resumed == 0);
+}
+
+void joinSeesTheSameThreeOutcomes() {
+    co2::ManualExecutor executor;
+    auto resumed = 0;
+    auto value = co2::spawn(executor, chain(1, Leaf::returns, resumed, nullptr));
+    auto stops = co2::spawn(executor, chain(1, Leaf::stops, resumed, nullptr));
+    auto fails = co2::spawn(executor, chain(1, Leaf::fails, resumed, nullptr));
+    CHECK(executor.run() == 3U);
+
+    CHECK(value.join() == 2);
+    CHECK(not stops.join().has_value());
+    auto sawCode = false;
+    try {
+        fails.join();
+    } catch (std::system_error const& exception) {
+        sawCode = exception.code() == sample::Errc::gone;
+    }
+    CHECK(sawCode);
+}
+
+// 每一层都由恢复循环驱动：十万层的链上传播不长栈，析构也不递归。
+void aDeepChainPropagatesWithoutGrowingTheStack() {
+    constexpr int depth = 100000;
+    auto resumed = 0;
+    CHECK(not co2::syncWait(chain(depth, Leaf::stops, resumed, nullptr)).has_value());
+
+    auto sawCode = false;
+    try {
+        co2::syncWait(chain(depth, Leaf::fails, resumed, nullptr));
+    } catch (std::system_error const& exception) {
+        sawCode = exception.code() == sample::Errc::gone;
+    }
+    CHECK(sawCode);
+    CHECK(resumed == 0);
+}
+
+auto awaitsAnLvalueTask(Leaf leaf, int& resumed, bool& reached)
+    CO2_BEG(co2::Task<int>, (leaf, resumed, reached), co2::Task<int> child;
+            int value{};) {
+    child = chain(0, leaf, resumed, nullptr);
+    CO2_AWAIT_SET(value, child);
+    reached = true;
+    CO2_RETURN(value);
+}
+CO2_END
+
+void anLvalueTaskPropagatesTheSameWay() {
+    auto resumed = 0;
+    auto reached = false;
+    CHECK(not co2::syncWait(awaitsAnLvalueTask(Leaf::stops, resumed, reached))
+                  .has_value());
+    CHECK(not reached);
+    CHECK(co2::syncWait(awaitsAnLvalueTask(Leaf::returns, resumed, reached)) == 1);
+    CHECK(reached);
+}
+
+// 只转发标准三个成员的包装 awaiter：它不认识 await_completion()，所以被包住的 Task 的
+// 结果只能经 await_resume() 出来。
+struct Forwards {
+    co2::Task<int> task;
+
+    bool await_ready() const noexcept { return task.await_ready(); }
+
+    template <class Promise>
+    co2::coroutine_handle<>
+    await_suspend(co2::coroutine_handle<Promise> const awaiting) noexcept {
+        return task.await_suspend(awaiting);
+    }
+
+    int await_resume() { return task.await_resume(); }
+};
+
+auto awaitsThroughAWrapper(Leaf leaf, int& resumed)
+    CO2_BEG(co2::Task<int>, (leaf, resumed), int value{};) {
+    CO2_AWAIT_SET(value, Forwards{chain(0, leaf, resumed, nullptr)});
+    CO2_RETURN(value + 10);
+}
+CO2_END
+
+// 错误照旧能穿过旧式的调用方：await_resume() 把它抛出来。
+void anErrorStillCrossesAnAwaiterThatOnlyKnowsThreeMembers() {
+    auto resumed = 0;
+    CHECK(co2::syncWait(awaitsThroughAWrapper(Leaf::returns, resumed)) == 11);
+
+    auto sawCode = false;
+    try {
+        co2::syncWait(awaitsThroughAWrapper(Leaf::fails, resumed));
+    } catch (std::system_error const& exception) {
+        sawCode = exception.code() == sample::Errc::gone;
+    }
+    CHECK(sawCode);
+
+    auto sawOriginal = false;
+    try {
+        co2::syncWait(awaitsThroughAWrapper(Leaf::throws, resumed));
+    } catch (ExpectedError const&) {
+        sawOriginal = true;
+    }
+    CHECK(sawOriginal);
+}
+
 } // namespace
 
 int main() {
@@ -412,5 +597,13 @@ int main() {
     aCoroutineThatDoesNotSuspendAtTheEndDestroysItself();
     anErrorCodeReachesAStandardPromiseAsSystemError();
     aCapturedExceptionReachesAStandardPromiseUnchanged();
+    valuesStillFlowThroughTheChain();
+    anErrorPassesThroughEveryLayerAndIsThrownAtTheRoot();
+    aStoppedTaskEndsEveryAwaiterAndTheRootReturnsEmpty();
+    anExceptionIsRethrownUnchangedAtTheRoot();
+    joinSeesTheSameThreeOutcomes();
+    aDeepChainPropagatesWithoutGrowingTheStack();
+    anLvalueTaskPropagatesTheSameWay();
+    anErrorStillCrossesAnAwaiterThatOnlyKnowsThreeMembers();
     return 0;
 }

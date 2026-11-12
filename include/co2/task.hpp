@@ -4,10 +4,14 @@
 #include <type_traits>
 #include <utility>
 
+#include <memory>
+#include <new>
+
+#include "co2/completion.hpp"
 #include "co2/contract.hpp"
 #include "co2/coroutine.hpp"
-#include "co2/detail/result_storage.hpp"
 #include "co2/env.hpp"
+#include "co2/error.hpp"
 #include "co2/optional.hpp"
 #include "co2/result.hpp"
 #include "co2/stop_token.hpp"
@@ -23,6 +27,11 @@
 // CO2_AWAIT_SET(token, co2::getStopToken()) 读取。继承是借用而不是拷贝：父在子运行期间
 // 一直挂着，子 promise 只记下父的停止状态，不碰引用计数（detail::EnvStopToken）。
 //
+// 三种完成方式（docs/design/completion-channels.md）：Task 以值、错误或已停止结束。
+// 错误与已停止按值沿等待链向上传——等待它的协程不再往下执行，以同样的结果结束——只在
+// 根（syncWait、JoinHandle::join）上变回异常或空的 optional。协程体里抛出的异常在
+// unhandled_exception() 里被捕获成一个 Error，此后同样按值传，中间各层不再重抛。
+//
 // 销毁契约（标准规则）：一个已经启动、尚未完成的 Task 不能销毁——它挂起在某个操作
 // 上，而操作只有完成后才能销毁其状态。co2 把这条未定义行为报告为契约违规。取消是
 // 协作式的：请求 stop → 操作提前完成 → Task 走到 final suspend → owner 销毁。
@@ -35,10 +44,40 @@ namespace detail {
 
 struct TaskAccess;
 
+// Task 的结果。empty：还没结束，或者值已经被取走。
+enum class TaskState : unsigned char { empty, value, error, stopped };
+
+// 值与错误共用的一块存储，自己不带标记：哪个成员活着由 TaskPromise::state 说明。两者
+// 互斥，分开存是白占空间；标记放在 promise 里则是为了和 started 挨在一起，共占一个对齐
+// 单位。于是 promise 与从前只存 exception_ptr 的时候一样大，帧不变大。
+template <class T> union TaskStorage {
+    TaskStorage() noexcept {}
+    ~TaskStorage() {}
+
+    T value;
+    Error error;
+};
+
+template <> union TaskStorage<void> {
+    TaskStorage() noexcept {}
+    ~TaskStorage() {}
+
+    Error error;
+};
+
 template <class T> struct TaskPromise {
     // 声明构造函数是为了让它不是聚合类型。聚合在 C++20 起可以用圆括号初始化，"能用参数
     // 副本构造 promise 就传入"的规则会因此拿协程的第一个参数去初始化 continuation。
     TaskPromise() = default;
+    TaskPromise(TaskPromise const&) = delete;
+    TaskPromise& operator=(TaskPromise const&) = delete;
+
+    ~TaskPromise() {
+        if (state == TaskState::value)
+            destroyValue(std::is_void<T>{});
+        else if (state == TaskState::error)
+            storage.error.~Error();
+    }
 
     Task<T> get_return_object() noexcept;
 
@@ -58,19 +97,28 @@ template <class T> struct TaskPromise {
 
     FinalAwaiter final_suspend() noexcept { return {}; }
 
+    // 圆括号是有意的：泛型 T 上花括号可能选中 initializer_list 构造函数。
     template <class Value, class U = T,
               class = typename std::enable_if<not std::is_void<U>::value>::type>
     void return_value(Value&& value) {
-        storage.emplace(std::forward<Value>(value));
+        ::new (static_cast<void*>(std::addressof(storage.value)))
+            U(std::forward<Value>(value));
+        state = TaskState::value;
     }
 
     template <class U = T,
               class = typename std::enable_if<std::is_void<U>::value>::type>
     void return_void() noexcept {
-        storage.emplace();
+        state = TaskState::value;
     }
 
-    void unhandled_exception() noexcept { error = std::current_exception(); }
+    // 异常只在这里被捕获一次；之后它是一个按值传的 Error，到根上才重新抛出。
+    void unhandled_exception() noexcept { fail(Error{std::current_exception()}); }
+
+    // 等待的操作出错 / 已停止（或者体内 CO2_AWAIT(just_error(e)) 之类）：本 Task 以同样的
+    // 结果结束。由恢复点在协程体收尾之后调用，见 FrameCore::finishUnlessValue。
+    void return_error(Error error) noexcept { fail(std::move(error)); }
+    void return_stopped() noexcept { state = TaskState::stopped; }
 
     // ---- 环境 ----
 
@@ -90,18 +138,50 @@ template <class T> struct TaskPromise {
         return std::forward<Awaitable>(awaitable);
     }
 
-    // 只可消费一次：值被移出。
+    // 这个 Task 是怎么结束的。给认识 await_completion() 的等待者用：错误被移出去，所以
+    // 每次等待只问一次。值已被取走（empty）时也报告"有值"，由随后的 result() 诊断。
+    Completion completion() noexcept {
+        if (state == TaskState::stopped) return Completion::stopped();
+        if (state == TaskState::error) return Completion::error(std::move(storage.error));
+        return Completion::value();
+    }
+
+    // 取走值，只可一次。它同时是不认识 await_completion() 的调用方的兜底（手写的包装
+    // awaiter、原生 co_await 都直接调用 await_resume()）：错误在这里变回异常，与从前
+    // 一样；已停止没有值可给，是契约违规。
     T result() {
-        if (error) std::rethrow_exception(error);
-        CO2_CONTRACT_CHECK(storage.hasValue());
-        return storage.take();
+        if (state == TaskState::error) storage.error.raise();
+        CO2_CONTRACT_CHECK(state == TaskState::value);
+        return takeValue(std::is_void<T>{});
     }
 
     coroutine_handle<> continuation;
-    std::exception_ptr error;
-    ResultStorage<T> storage;
+    TaskStorage<T> storage;
     EnvStopToken stopToken; // 根持有引用；被等待的子 Task 借用等待者的
+    TaskState state{TaskState::empty};
     bool started{};
+
+  private:
+    void fail(Error error) noexcept {
+        ::new (static_cast<void*>(std::addressof(storage.error))) Error{std::move(error)};
+        state = TaskState::error;
+    }
+
+    // 移动构造抛出时值留在原处、state 不变，析构函数仍会清理。
+    template <class U = T> U takeValue(std::false_type) {
+        U result(std::move(storage.value));
+        storage.value.~U();
+        state = TaskState::empty;
+        return result;
+    }
+
+    void takeValue(std::true_type) noexcept { state = TaskState::empty; }
+
+    template <class U = T> void destroyValue(std::false_type) noexcept {
+        storage.value.~U();
+    }
+
+    void destroyValue(std::true_type) noexcept {}
 };
 
 // 等待一个 Task：记下等待者，对称转移进 Task；Task 完成时 FinalAwaiter 转移回来。
@@ -126,6 +206,11 @@ template <class T> struct TaskAwaiter {
     T await_resume() {
         CO2_CONTRACT_CHECK(handle);
         return handle.promise().result();
+    }
+
+    Completion await_completion() noexcept {
+        CO2_CONTRACT_CHECK(handle);
+        return handle.promise().completion();
     }
 };
 
@@ -167,6 +252,8 @@ template <class T> struct Task {
     }
 
     T await_resume() { return awaiter().await_resume(); }
+
+    Completion await_completion() noexcept { return awaiter().await_completion(); }
 
     // 左值（CO2_AWAIT(task)）：借用句柄，Task 继续拥有帧。
     detail::TaskAwaiter<T> operator_co_await() & noexcept { return awaiter(); }
@@ -236,18 +323,20 @@ struct TaskAccess {
         return task.handle.promise().result();
     }
 
-    // 根取走结果（只可一次）。
+    // 根取走结果（只可一次）：已停止是空的 optional，错误在这里变回异常。
     template <class T> static RootResult<T> takeRootResult(Task<T>& task) {
+        CO2_CONTRACT_CHECK(task.handle && task.handle.done());
+        if (task.handle.promise().state == TaskState::stopped) return RootResult<T>{};
         return takeRootResult(task, std::is_void<T>{});
     }
 
     template <class T> static bool hasError(Task<T> const& task) noexcept {
-        return task.handle && task.handle.promise().error != nullptr;
+        return task.handle && task.handle.promise().state == TaskState::error;
     }
 
     template <class T> static void rethrowError(Task<T>& task) {
         CO2_CONTRACT_CHECK(hasError(task));
-        std::rethrow_exception(task.handle.promise().error);
+        task.handle.promise().storage.error.raise();
     }
 
     // 交出帧的所有权（类型擦除）：调用方负责在完成后 destroy()。
