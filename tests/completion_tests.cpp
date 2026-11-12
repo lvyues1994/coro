@@ -25,6 +25,7 @@
 #include "co2/spawn.hpp"
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
+#include "completion_support.hpp"
 #include "sample_errc.hpp"
 
 namespace {
@@ -44,24 +45,19 @@ std::vector<std::string> events;
 
 void record(char const* const event) { events.emplace_back(event); }
 
-co2::Completion stopped() { return co2::Completion::stopped(); }
-co2::Completion failed() { return co2::Completion::error(sample::Errc::gone); }
+// 与 completion_components_tests.cpp 共用的 awaiter 与协程，见 completion_support.hpp。
+using sample::chain;
+using sample::Ends;
+using sample::ExpectedError;
+using sample::failed;
+using sample::Leaf;
+using sample::stopped;
 
 // ---------------------------------------------------------------------------
 // 测试自己的 awaiter
 
-// 立刻就绪，以给定的方式结束；有值时 await_resume() 给出 7。
-struct Ends {
-    co2::Completion completion;
-
-    bool await_ready() const noexcept { return true; }
-    void await_suspend(co2::coroutine_handle<>) const noexcept {}
-    int await_resume() const noexcept { return 7; }
-    co2::Completion await_completion() noexcept { return completion; }
-};
-
-// 同上，并把协议调用与自己的析构记进事件日志。临时对象被移进帧之后析构，那一次不记：
-// 只有被问过 await_completion() 的那个对象才记。
+// 立刻就绪，以给定的方式结束，并把协议调用与自己的析构记进事件日志。临时对象被移进帧
+// 之后析构，那一次不记：只有被问过 await_completion() 的那个对象才记。
 struct Logs {
     explicit Logs(co2::Completion completion_) noexcept
         : completion{std::move(completion_)} {}
@@ -409,40 +405,6 @@ void aCapturedExceptionReachesAStandardPromiseUnchanged() {
 
 // ---------------------------------------------------------------------------
 // Task：错误与已停止按值沿等待链向上传，只在根上变回异常或空的 optional
-
-struct ExpectedError : std::runtime_error {
-    ExpectedError() : std::runtime_error{"expected"} {}
-};
-
-enum class Leaf { returns, fails, stops, throws };
-
-// 记下每一层的局部是按什么顺序析构的。
-struct DepthGuard {
-    std::vector<int>* order{};
-    int depth{};
-    ~DepthGuard() {
-        if (order != nullptr) order->push_back(depth);
-    }
-};
-
-// 一条 depth + 1 层的等待链：最里面一层按 leaf 结束，外面每一层等待里面一层、把结果
-// 加一。`resumed` 数的是有多少层在等待之后继续执行了。
-auto chain(int depth, Leaf leaf, int& resumed, std::vector<int>* order)
-    CO2_BEG(co2::Task<int>, (depth, leaf, resumed, order), int value{};
-            DepthGuard guard;) {
-    guard.order = order;
-    guard.depth = depth;
-    if (depth == 0) {
-        if (leaf == Leaf::throws) throw ExpectedError{};
-        if (leaf == Leaf::fails) CO2_AWAIT(Ends{failed()});
-        if (leaf == Leaf::stops) CO2_AWAIT(Ends{stopped()});
-        CO2_RETURN(1);
-    }
-    CO2_AWAIT_SET(value, chain(depth - 1, leaf, resumed, order));
-    ++resumed;
-    CO2_RETURN(value + 1);
-}
-CO2_END
 
 void valuesStillFlowThroughTheChain() {
     auto resumed = 0;
