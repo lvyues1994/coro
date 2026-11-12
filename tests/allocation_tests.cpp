@@ -192,23 +192,26 @@ void whenAllInsideATaskAllocatesChildFramesStopStateAndAwaiterSlot() {
     CHECK_ALLOCATIONS(5, CHECK(co2::syncWait(awaitsWhenAll()) == 3));
 }
 
-// CallbackAwaitable<T> 的布局：MoveOnlyFunction（4 指针）+ 句柄 + T + 原子状态字 +
-// exception_ptr，四个标志共用一个状态字，结果不带自己的 engaged 标志。int 与 void 的
-// awaiter 在 exception_ptr 为 1 指针（libstdc++/libc++）或 2 指针（MSVC）时都放得进
-// 8 指针的内联 awaiter 槽；超过 4 字节的 T 在 MSVC 上回落到堆，见下方的 largeResult。
-template <class T>
-using CallbackAwaiterSize =
-    std::integral_constant<std::size_t, 5U * sizeof(void*) + sizeof(T) +
-                                            sizeof(std::atomic<unsigned>) +
-                                            sizeof(std::exception_ptr)>;
-static_assert(sizeof(co2::CallbackAwaitable<int>) == CallbackAwaiterSize<int>::value,
-              "CallbackAwaitable<int> must carry no padding beyond its five words");
-static_assert(sizeof(co2::CallbackAwaitable<void>) <= CallbackAwaiterSize<int>::value,
-              "CallbackAwaitable<void> must be no larger than the int one");
+// CallbackAwaitable<T> 的布局：MoveOnlyFunction（4 指针）+ 句柄 + 结果 + 原子状态字。
+// 结果的三种形态——值、错误码、捕获的异常——共用一块存储，哪一种活着由状态字里的标志
+// 说明；这块存储至少有一个 std::error_code 那么大（2 个指针）。所以结果不超过 2 个指针
+// 宽的 awaiter 都正好是 8 个指针，放得进内联 awaiter 槽，exception_ptr 是 1 个指针
+// （libstdc++ / libc++）还是 2 个（MSVC）都一样。
+struct TwoWords {
+    void const* words[2];
+};
+static_assert(sizeof(co2::CallbackAwaitable<int>) == 8U * sizeof(void*),
+              "CallbackAwaitable<int> must be exactly eight words");
+static_assert(sizeof(co2::CallbackAwaitable<void>) == 8U * sizeof(void*),
+              "CallbackAwaitable<void> must be exactly eight words");
+static_assert(sizeof(co2::CallbackAwaitable<TwoWords>) == 8U * sizeof(void*),
+              "a two-word result must share its storage with the error");
 static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<int>>(),
               "CallbackAwaitable<int> must stay within the inline awaiter slot");
 static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<void>>(),
               "CallbackAwaitable<void> must stay within the inline awaiter slot");
+static_assert(co2::detail::AwaitSlot<>::isInline<co2::CallbackAwaitable<TwoWords>>(),
+              "a two-word result must stay within the inline awaiter slot");
 
 auto viaCallback(int v) CO2_BEG(co2::Task<int>, (v), int got{};) {
     // 闭包只捕获 this：落在 MoveOnlyFunction 的内联缓冲里，不分配。

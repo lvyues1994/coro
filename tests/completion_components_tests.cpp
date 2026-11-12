@@ -2,6 +2,7 @@
 // 机制本身——恢复点、promise 的两个入口、Task——在 completion_tests.cpp 里测。
 
 #include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <system_error>
 #include <tuple>
@@ -10,6 +11,7 @@
 
 #include "co2/as_result.hpp"
 #include "co2/async_generator.hpp"
+#include "co2/callback.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/env.hpp"
 #include "co2/just.hpp"
@@ -321,6 +323,89 @@ void theFailureIsDeliveredOnceAndThenTheStreamIsOver() {
     CHECK(not hasAfterwards);
 }
 
+// ---------------------------------------------------------------------------
+// fromCallback：续体的四个出口——值、错误码、异常、已停止
+
+enum class Exit { value, code, exception, stopped };
+
+auto completesWith(Exit how, bool& reached)
+    CO2_BEG(co2::Task<int>, (how, reached), int got{};) {
+    CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<int>,
+                     co2::fromCallback<int>([this](co2::Continuation<int> done) {
+                         if (how == Exit::value) done(5);
+                         if (how == Exit::code) done.setError(sample::Errc::gone);
+                         if (how == Exit::exception)
+                             done.setException(std::make_exception_ptr(ExpectedError{}));
+                         if (how == Exit::stopped) done.setStopped();
+                     }));
+    reached = true;
+    CO2_RETURN(got);
+}
+CO2_END
+
+void theContinuationHasFourExits() {
+    auto reached = false;
+    CHECK(co2::syncWait(completesWith(Exit::value, reached)) == 5);
+    CHECK(reached);
+
+    reached = false;
+    auto const code = co2::syncWait(co2::asResult(completesWith(Exit::code, reached)));
+    CHECK(code->hasError());
+    CHECK(code->error().exception() == nullptr); // 按值传过来的错误码
+    CHECK(code->error().code() == sample::Errc::gone);
+    CHECK(not reached);
+
+    auto const exception =
+        co2::syncWait(co2::asResult(completesWith(Exit::exception, reached)));
+    CHECK(exception->hasError());
+    CHECK(exception->error().exception() != nullptr);
+    CHECK(not reached);
+
+    CHECK(co2::syncWait(co2::asResult(completesWith(Exit::stopped, reached)))
+              ->isStopped());
+    CHECK(not reached);
+}
+
+auto waitsForTheApi(co2::Continuation<int>& stored, bool& reached)
+    CO2_BEG(co2::Task<int>, (stored, reached), int got{};) {
+    CO2_AWAIT_AS_SET(
+        got, co2::CallbackAwaitable<int>,
+        co2::fromCallback<int>([this](co2::Continuation<int> done) { stored = done; }));
+    reached = true;
+    CO2_RETURN(got);
+}
+CO2_END
+
+// API 的取消回调里这样报告"已取消"：等待它的协程以已停止结束。
+void anApiThatFinishesLaterCanReportStopped() {
+    co2::ManualExecutor executor;
+    auto stored = co2::Continuation<int>{};
+    auto reached = false;
+    auto handle = co2::spawn(executor, waitsForTheApi(stored, reached));
+    CHECK(executor.run() == 1U);
+    CHECK(stored);
+    CHECK(not handle.isReady());
+
+    stored.setStopped();
+    CHECK(handle.isReady());
+    CHECK(not handle.join().has_value());
+    CHECK(not reached);
+}
+
+// 不认识 await_completion() 的调用方直接调用 await_resume()：错误码以异常的形式出现。
+void anErrorCodeFromACallbackRaisesForACallerThatSkipsAwaitCompletion() {
+    auto awaitable = co2::fromCallback<int>(
+        [](co2::Continuation<int> done) { done.setError(sample::Errc::gone); });
+    CHECK(not awaitable.await_suspend(co2::noop_coroutine())); // 已经完成：不挂起
+    auto sawCode = false;
+    try {
+        awaitable.await_resume();
+    } catch (std::system_error const& exception) {
+        sawCode = exception.code() == sample::Errc::gone;
+    }
+    CHECK(sawCode);
+}
+
 } // namespace
 
 int main() {
@@ -334,5 +419,8 @@ int main() {
     whenAllOfAVectorFollowsTheSameRules();
     aFailingProducerEndsItsConsumerTheSameWay();
     theFailureIsDeliveredOnceAndThenTheStreamIsOver();
+    theContinuationHasFourExits();
+    anApiThatFinishesLaterCanReportStopped();
+    anErrorCodeFromACallbackRaisesForACallerThatSkipsAwaitCompletion();
     return 0;
 }
