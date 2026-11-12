@@ -48,8 +48,18 @@ int main() {
 namespace {
 
 std::atomic<long> allocations{0};
+std::atomic<long> allocatedBytes{0};
 
 long allocationsSoFar() noexcept { return allocations.load(std::memory_order_relaxed); }
+
+long bytesSoFar() noexcept { return allocatedBytes.load(std::memory_order_relaxed); }
+
+// 运行 `body` 期间经全局 operator new 分配的字节数。
+template <class Body> long bytesAllocatedBy(Body&& body) {
+    auto const before = bytesSoFar();
+    body();
+    return bytesSoFar() - before;
+}
 
 void fail(char const* expression, int line) {
     std::cerr << "check failed at line " << line << ": " << expression << '\n';
@@ -271,6 +281,65 @@ void callbackAwaiterKeepsAThreePointerClosureInline() {
                  6));
 }
 
+// ---------------------------------------------------------------------------
+// 帧的大小：小协程的帧不该被用不上的固定开销撑大。
+
+// 带状态的 allocator（一个指针）：必须在帧里留一份副本，释放时要用。
+template <class Value> struct TaggedAllocator {
+    using value_type = Value;
+    int* tag;
+    explicit TaggedAllocator(int& tag_) noexcept : tag{&tag_} {}
+    template <class U>
+    TaggedAllocator(TaggedAllocator<U> const& other) noexcept : tag{other.tag} {}
+    Value* allocate(std::size_t const count) {
+        return static_cast<Value*>(::operator new(count * sizeof(Value)));
+    }
+    void deallocate(Value* const pointer, std::size_t) noexcept {
+        ::operator delete(pointer);
+    }
+    template <class U> struct rebind { using other = TaggedAllocator<U>; };
+};
+
+auto leafWithTaggedAllocator(TaggedAllocator<unsigned char> allocator, int v)
+    CO2_BEG_WITH_ALLOCATOR(co2::Task<int>, allocator, (v)) {
+    CO2_RETURN(v);
+}
+CO2_END
+
+// 与 counting() 同形状（一个 int 参数、一个 int 局部）的 Task。
+auto countingTask(int limit) CO2_BEG(co2::Task<int>, (limit), int index{};) {
+    for (index = 0; index < limit; ++index)
+        CO2_AWAIT(co2::suspend_never{});
+    CO2_RETURN(index);
+}
+CO2_END
+
+void framesCarryNoUnusedFixedOverhead() {
+    auto tag = 0;
+    auto const defaultBytes = bytesAllocatedBy([] { auto task = leaf(1); });
+    auto const taggedBytes = bytesAllocatedBy([&] {
+        auto task = leafWithTaggedAllocator(TaggedAllocator<unsigned char>{tag}, 1);
+    });
+    // 空的 allocator（std::allocator）不占帧；带状态的才占。
+    CHECK(defaultBytes < taggedBytes);
+
+    // 生成器体内禁止 co_await，它的 awaiter 最大两个指针：帧里不带 8 指针的通用 awaiter
+    // 槽，比同形状的 Task 帧小。
+    static_assert(co2::detail::AwaitStorageSize<co2::Generator<int>::promise_type>::value ==
+                      2U * sizeof(void*),
+                  "generator frames carry a two-pointer awaiter slot");
+    auto const generatorBytes = bytesAllocatedBy([] { auto generator = counting(1); });
+    auto const taskBytes = bytesAllocatedBy([] { auto task = countingTask(1); });
+    CHECK(generatorBytes < taskBytes);
+
+#if defined(__x86_64__) && defined(__GLIBCXX__)
+    // 具体数字只在这个 ABI 上钉住：防止帧在不知不觉中变大。
+    CHECK(defaultBytes == 176);
+    CHECK(taskBytes == 176);
+    CHECK(generatorBytes == 144);
+#endif
+}
+
 void spawnIsTwoAllocationsBeyondTheFrame() {
     // 帧 + JoinState + 它自己的 stop 状态。
     co2::ManualExecutor executor;
@@ -299,6 +368,7 @@ void spawnIsTwoAllocationsBeyondTheFrame() {
 
 void* operator new(std::size_t const size) {
     allocations.fetch_add(1, std::memory_order_relaxed);
+    allocatedBytes.fetch_add(static_cast<long>(size), std::memory_order_relaxed);
     if (auto* const pointer = std::malloc(size == 0U ? 1U : size)) return pointer;
     throw std::bad_alloc{};
 }
@@ -332,6 +402,7 @@ int main() {
     voidCallbackAwaiterAllocatesNothingBeyondTheFrame();
     oversizedCallbackAwaiterFallsBackToOneHeapAllocation();
     callbackAwaiterKeepsAThreePointerClosureInline();
+    framesCarryNoUnusedFixedOverhead();
     spawnIsTwoAllocationsBeyondTheFrame();
     return 0;
 }

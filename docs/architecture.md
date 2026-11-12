@@ -45,10 +45,16 @@ C++14 没有语言级协程。co2 用宏生成的 switch 状态机模拟挂起�
 FrameHeader { destroy, step, done, running }   ← 句柄指向这里（偏移 0）
 Promise                                        ← 紧随其后（FramePrefix，固定偏移）
 参数副本（_co2_capture_pack）
-局部 + 程序计数器（_co2_body）
-AwaitSlot（awaiter 槽：内联 8 个指针宽度，超出退化为堆）
-Allocator
+局部（_co2_body）
+程序计数器、局部存活标志
+AwaitSlot（awaiter 槽：默认内联 8 个指针宽度，超出退化为堆）
+Allocator（只有带状态的 allocator 才在帧里留副本）
 ```
+
+帧里没有用不上的固定开销：空的 allocator（`std::allocator`）不占空间，释放时重新构造
+一个；awaiter 槽的内联容量可以按 promise 特化（`detail::AwaitStorageSize`），生成器体内
+禁止 `co_await`，它的槽只有 2 个指针宽度。x86-64 上 `Task<int>(int)` 的帧是 176 字节，
+`Generator<int>(int)` 带一个 `int` 局部是 144 字节。
 
 构造顺序 参数副本 → promise → 局部；销毁顺序 awaiter → 局部 → promise → 参数副本，
 与标准一致。局部在离开协程体作用域时（`co_return`、掉出末尾、异常逃出）就销毁，早于

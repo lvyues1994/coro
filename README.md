@@ -245,7 +245,7 @@ co2::setContractViolationHandler([](co2::ContractViolation const& v) {
 | `co2/contract.hpp` / `config.hpp` | 契约处理器、版本与配置宏 |
 
 每个头都能独立包含。awaiter 默认内联保存在帧内（8 个指针宽度，
-`CO2_AWAIT_STORAGE_SIZE`），更大的退化为一次堆分配。
+`CO2_AWAIT_STORAGE_SIZE`；生成器帧只留 2 个指针宽度），更大的退化为一次堆分配。
 
 ## 尚未提供
 

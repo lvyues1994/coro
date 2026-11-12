@@ -401,11 +401,11 @@ Return startCoroutine(Body body, Allocator allocator) {
 +---------------------------------------------+
 | Params { 参数副本... }                        |   宏生成
 | Body   { 参数引用..., 局部... }                |   宏生成
-| AwaitSlot（内联 8 指针，超出退化为堆）          |
-| unsigned suspendPoint                       |
+| SuspendPoint suspendPoint                   |
 | bool bodyAlive                              |
+| AwaitSlot（默认内联 8 指针，超出退化为堆）       |   容量可按 promise 特化（生成器：2 指针）
 +---------------------------------------------+
-| Allocator                                   |   rebind 后的分配器副本
+| Allocator                                   |   rebind 后的分配器副本；空的 allocator 不存
 +---------------------------------------------+
 ```
 

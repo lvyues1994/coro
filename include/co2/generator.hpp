@@ -207,6 +207,20 @@ template <class Ref, class V> struct GeneratorPromise {
     static Generator<Ref, V> toGenerator(Range&& range, std::false_type);
 };
 
+// 生成器体内禁止 co_await，槽里只会出现这四种 awaiter，最大的是持有嵌套生成器的
+// NestedAwaiter（句柄 + 标志）。帧里不必带 8 个指针的通用 awaiter 槽。
+template <class Ref, class V>
+struct AwaitStorageSize<GeneratorPromise<Ref, V>>
+    : std::integral_constant<std::size_t, 2U * sizeof(void*)> {
+    using Promise = GeneratorPromise<Ref, V>;
+    using Slot = AwaitSlot<2U * sizeof(void*)>;
+    static_assert(Slot::template isInline<suspend_always>() &&
+                      Slot::template isInline<typename Promise::FinalAwaiter>() &&
+                      Slot::template isInline<typename Promise::StoredYieldAwaiter>() &&
+                      Slot::template isInline<typename Promise::NestedAwaiter>(),
+                  "every generator awaiter must fit the two-pointer slot");
+};
+
 } // namespace detail
 
 // std::ranges::elements_of 的 C++14 拼写（函数：没有 CTAD）。左值范围按引用持有。

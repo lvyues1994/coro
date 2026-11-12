@@ -42,6 +42,13 @@ namespace detail {
 // 就是编译错误，而不是等到恢复时才发现标签绑错了 switch。
 enum class SuspendPoint : unsigned {};
 
+// 帧内 awaiter 槽的内联容量（字节）。默认是 CO2_AWAIT_STORAGE_SIZE；一个 promise 的全部
+// awaiter 都是已知的小类型时（例如生成器：体内禁止 co_await）可以特化得更小，省掉每个帧
+// 里用不上的缓冲。超出容量的 awaiter 照常回落到堆，所以特化只影响大小，不影响正确性。
+template <class Promise>
+struct AwaitStorageSize
+    : std::integral_constant<std::size_t, CO2_AWAIT_STORAGE_SIZE> {};
+
 // 帧中与 allocator 无关的部分。Body 的 operator() 以它为上下文，因此每个协程体只
 // 实例化一份 step 逻辑，不随 allocator 变化。
 template <class Promise, class Params, class Body> struct FrameCore {
@@ -53,11 +60,13 @@ template <class Promise, class Params, class Body> struct FrameCore {
     FramePrefix<Promise> prefix;
     alignas(Params) unsigned char paramsStorage[sizeof(Params)];
     alignas(Body) unsigned char bodyStorage[sizeof(Body)];
-    AwaitSlot<> slot;
+    // 两个小成员排在 awaiter 槽之前：槽按 max_align_t 对齐，它前面常有一段填充可以容纳
+    // 它们；排在槽后面则每个帧都要为这 5 个字节多占一整个对齐单位。
     SuspendPoint suspendPoint;
     // 局部（Body）在离开协程体作用域时就销毁——co_return、掉出末尾或异常逃出——
     // 早于 final_suspend，与标准一致；destroy() 只销毁仍然存活的那一份。
     bool bodyAlive;
+    AwaitSlot<AwaitStorageSize<Promise>::value> slot;
 
     // ---- Body 侧的访问 ----
 
@@ -332,8 +341,48 @@ template <class Frame, class Promise, class FrameAllocator> struct FrameMemory {
 
 // ---- 完整的帧 ----
 
+// 帧的数据成员：核心 + allocator 的副本（释放帧时要用）。allocator 是空类型且可默认构造
+// 时（std::allocator、无状态的自定义 allocator）不保存副本——这类 allocator 的实例可以
+// 互换，释放时重新构造一个即可，帧因此不必为一个空对象多占一个对齐单位。
+template <class Core, class FrameAllocator, bool StatelessAllocator>
+struct FrameLayout {
+    Core core;
+    alignas(FrameAllocator) unsigned char allocatorStorage[sizeof(FrameAllocator)];
+
+    void storeAllocator(FrameAllocator const& allocator) noexcept {
+        ::new (static_cast<void*>(allocatorStorage)) FrameAllocator{allocator};
+    }
+
+    // 取走副本并结束它在帧里的生命周期。
+    FrameAllocator takeAllocator() noexcept {
+        auto& stored = *reinterpret_cast<FrameAllocator*>(allocatorStorage);
+        auto taken = FrameAllocator{std::move(stored)};
+        stored.~FrameAllocator();
+        return taken;
+    }
+};
+
+template <class Core, class FrameAllocator>
+struct FrameLayout<Core, FrameAllocator, true> {
+    Core core;
+
+    void storeAllocator(FrameAllocator const&) noexcept {}
+    FrameAllocator takeAllocator() noexcept { return FrameAllocator{}; }
+};
+
+template <class Allocator>
+using IsStatelessAllocator =
+    std::integral_constant<bool, std::is_empty<Allocator>::value &&
+                                     std::is_default_constructible<Allocator>::value>;
+
+// 帧本身没有自己的数据成员，全部在 FrameLayout 里：标准布局类与它唯一带数据的基类共用
+// 地址，帧头 → 前缀 → 核心 → 帧 这条"首成员"链不变。
 template <class Promise, class Params, class Body, class Allocator>
-struct CoroutineFrame {
+struct CoroutineFrame
+    : FrameLayout<FrameCore<Promise, Params, Body>,
+                  typename std::allocator_traits<Allocator>::template rebind_alloc<
+                      CoroutineFrame<Promise, Params, Body, Allocator>>,
+                  IsStatelessAllocator<Allocator>::value> {
     using Core = FrameCore<Promise, Params, Body>;
     using FrameAllocator = typename std::allocator_traits<
         Allocator>::template rebind_alloc<CoroutineFrame>;
@@ -344,9 +393,6 @@ struct CoroutineFrame {
     using CatchesBadAlloc = std::integral_constant<
         bool, HasAllocationFailureObject<Promise>::value &&
                   not HasPromiseOperatorNew<Promise>::value>;
-
-    Core core;
-    alignas(FrameAllocator) unsigned char allocatorStorage[sizeof(FrameAllocator)];
 
     // 分配并初始化帧：参数副本 → promise（能用参数副本构造就传入）→ 局部（Body）。
     // `makeParams(void*)` 在给定地址上构造参数副本：帧先分配，参数再直接移动进去。
@@ -363,8 +409,7 @@ struct CoroutineFrame {
 
         // 默认初始化：只构造 AwaitSlot，字节数组保持未初始化。
         auto* const frame = ::new (static_cast<void*>(storage)) CoroutineFrame;
-        ::new (static_cast<void*>(frame->allocatorStorage))
-            FrameAllocator{frameAllocator};
+        frame->storeAllocator(frameAllocator);
         frame->core.prefix.header = FrameHeader{&destroy, &step, false, false};
         frame->core.suspendPoint = SuspendPoint{};
         frame->core.bodyAlive = false;
@@ -432,8 +477,8 @@ struct CoroutineFrame {
 
   private:
     static CoroutineFrame* fromHeader(FrameHeader* const header) noexcept {
-        // header 是 core.prefix 的首成员，core.prefix 是 core 的首成员，core 是帧的首
-        // 成员；标准布局保证三者地址相同。
+        // header 是 core.prefix 的首成员，core.prefix 是 core 的首成员，core 是
+        // FrameLayout 的首成员，FrameLayout 是帧唯一的基类；标准布局保证它们地址相同。
         return reinterpret_cast<CoroutineFrame*>(header);
     }
 
@@ -457,9 +502,7 @@ struct CoroutineFrame {
 
     // 结束帧对象自身的生命周期并释放内存。
     static void release(CoroutineFrame* const frame) noexcept {
-        auto& stored = *reinterpret_cast<FrameAllocator*>(frame->allocatorStorage);
-        auto allocatorCopy = FrameAllocator{std::move(stored)};
-        stored.~FrameAllocator();
+        auto allocatorCopy = frame->takeAllocator();
         frame->~CoroutineFrame();
         Memory::deallocate(frame, allocatorCopy);
     }
