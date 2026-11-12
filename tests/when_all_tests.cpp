@@ -135,7 +135,7 @@ void resultTypesConcatenateValueChannels() {
 void readyChildrenCompleteWithoutSuspending() {
     std::atomic<int> counter{0};
     auto const results =
-        co2::syncWait(co2::whenAll(value(1), nothing(counter), text("x")));
+        *co2::syncWait(co2::whenAll(value(1), nothing(counter), text("x")));
     CHECK(std::get<0>(results) == 1);
     CHECK(std::get<1>(results) == "x");
     CHECK(counter.load() == 1);
@@ -146,20 +146,20 @@ void readyChildrenCompleteWithoutSuspending() {
 }
 
 void moveOnlyResultsFlowThroughTupleAndVector() {
-    auto tuple = co2::syncWait(co2::whenAll(unique(1), unique(2)));
+    auto tuple = *co2::syncWait(co2::whenAll(unique(1), unique(2)));
     CHECK(*std::get<0>(tuple) == 1 && *std::get<1>(tuple) == 2);
 
     std::vector<co2::Task<std::unique_ptr<int>>> tasks;
     for (int i = 0; i < 5; ++i)
         tasks.push_back(unique(i));
-    auto values = co2::syncWait(co2::whenAll(std::move(tasks)));
+    auto values = *co2::syncWait(co2::whenAll(std::move(tasks)));
     CHECK(values.size() == 5U);
     for (int i = 0; i < 5; ++i)
         CHECK(*values[static_cast<std::size_t>(i)] == i);
 }
 
 void emptyVectorCompletesImmediately() {
-    auto values = co2::syncWait(co2::whenAll(std::vector<co2::Task<int>>{}));
+    auto values = *co2::syncWait(co2::whenAll(std::vector<co2::Task<int>>{}));
     CHECK(values.empty());
     co2::syncWait(co2::whenAll(std::vector<co2::Task<>>{}));
 }
@@ -235,7 +235,7 @@ void childrenRunConcurrentlyOnAThreadPool() {
     std::vector<co2::Task<int>> tasks;
     for (int i = 0; i < 8; ++i)
         tasks.push_back(slowOnPool(pool, concurrency, i));
-    auto const values = co2::syncWait(co2::whenAll(std::move(tasks)));
+    auto const values = *co2::syncWait(co2::whenAll(std::move(tasks)));
     CHECK(values.size() == 8U);
     for (int i = 0; i < 8; ++i)
         CHECK(values[static_cast<std::size_t>(i)] == i);
@@ -477,7 +477,7 @@ void nestedWhenAllOverManyChildrenOnAPool() {
         }
         groups.push_back(sumOf(std::move(tasks)));
     }
-    auto const sums = co2::syncWait(co2::whenAll(std::move(groups)));
+    auto const sums = *co2::syncWait(co2::whenAll(std::move(groups)));
     long long total = 0;
     for (auto const s : sums)
         total += s;
@@ -499,7 +499,7 @@ void whenAllWorksInsideASpawnedTask() {
 void repeatedWhenAllDoesNotLeakOrCorrupt() {
     co2::ThreadPool pool{2U};
     for (int round = 0; round < 200; ++round) {
-        auto const results = co2::syncWait(co2::whenAll(
+        auto const results = *co2::syncWait(co2::whenAll(
             hopAndValue(pool, round), hopAndValue(pool, -round), value(1)));
         CHECK(std::get<0>(results) + std::get<1>(results) == 0);
         CHECK(std::get<2>(results) == 1);

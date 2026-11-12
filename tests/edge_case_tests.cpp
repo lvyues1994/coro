@@ -156,7 +156,7 @@ auto manyCommasWithAllocator()
 CO2_END
 
 void macroArgumentsMayContainManyTopLevelCommas() {
-    auto const values = co2::syncWait(manyCommas());
+    auto const values = *co2::syncWait(manyCommas());
     for (auto index = std::size_t{}; index != values.size(); ++index)
         CHECK(values[index] == static_cast<int>(index) + 1);
     CHECK(co2::syncWait(manyCommasWithAllocator()) == 1 + 3 + 5 + 7 + 9 + 12);

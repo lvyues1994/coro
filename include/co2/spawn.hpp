@@ -158,15 +158,16 @@ template <class T> struct JoinHandle {
         return state->source.get_token();
     }
 
-    // 阻塞到 Task 完成并取走结果（只可一次）。在 scheduler
-    // 的工作线程上调用会占住该线程。
-    T join() {
+    // 阻塞到 Task 完成并取走结果（只可一次）。返回值与 syncWait 同形：结果放在
+    // co2::optional 里，空表示已停止，Task 的异常在这里重抛。在 scheduler 的工作线程上
+    // 调用会占住该线程。
+    detail::RootResult<T> join() {
         CO2_CONTRACT_CHECK(state != nullptr);
         {
             std::unique_lock<std::mutex> lock{state->mutex};
             state->completed.wait(lock, [this] { return state->ready; });
         }
-        return detail::TaskAccess::takeResult(task);
+        return detail::TaskAccess::takeRootResult(task);
     }
 
     // ---- 等待：右值时 JoinHandle 本身是 awaiter（拥有），左值时借用 ----

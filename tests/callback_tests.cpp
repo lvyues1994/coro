@@ -159,9 +159,9 @@ auto uniqueResult()
 CO2_END
 
 void resultsAreConstructedInPlaceAndMovedOut() {
-    auto const pair = co2::syncWait(pairResult());
+    auto const pair = *co2::syncWait(pairResult());
     CHECK(pair.first == 3 && pair.second == "three");
-    auto unique = co2::syncWait(uniqueResult());
+    auto unique = *co2::syncWait(uniqueResult());
     CHECK(unique != nullptr && *unique == 9);
 }
 

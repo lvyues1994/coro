@@ -9,12 +9,15 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #include "co2/coroutine.hpp"
 #include "co2/detail/result_storage.hpp"
 #include "co2/env.hpp"
 #include "co2/manual_executor.hpp"
+#include "co2/optional.hpp"
+#include "co2/result.hpp"
 #include "co2/scheduler.hpp"
 #include "co2/spawn.hpp"
 #include "co2/stop_token.hpp"
@@ -79,6 +82,26 @@ void spawnOnAThreadPoolJoinsFromTheCallingThread() {
     CHECK(counter.load() == 1);
 }
 
+// join() 的返回值与 syncWait 同形：结果放在 optional 里，void 用 Unit 占位。
+void joinReturnsAnOptional() {
+    co2::ManualExecutor executor;
+    std::atomic<int> counter{0};
+    auto value = co2::spawn(executor, answer(5));
+    auto done = co2::spawn(executor, touch(counter));
+    static_assert(std::is_same<decltype(value.join()), co2::optional<int>>::value,
+                  "JoinHandle<int>::join() must return co2::optional<int>");
+    static_assert(
+        std::is_same<decltype(done.join()), co2::optional<co2::Unit>>::value,
+        "JoinHandle<void>::join() must return co2::optional<co2::Unit>");
+    CHECK(executor.run() == 2U);
+
+    co2::optional<int> const joined = value.join();
+    CHECK(joined.has_value());
+    CHECK(*joined == 5);
+    CHECK(done.join().has_value());
+    CHECK(counter.load() == 1);
+}
+
 auto failing() CO2_BEG(co2::Task<int>, ()) {
     throw ExpectedError{};
     CO2_RETURN(0);
@@ -104,7 +127,7 @@ CO2_END
 
 void joinMovesOutMoveOnlyResults() {
     co2::ThreadPool pool{1U};
-    auto result = co2::spawn(pool, uniqueAnswer()).join();
+    auto result = *co2::spawn(pool, uniqueAnswer()).join();
     CHECK(result != nullptr && *result == 9);
 }
 
@@ -309,6 +332,7 @@ void joinHandlesAreMovable() {
 int main() {
     spawnOnAManualExecutorStartsWhenItRuns();
     spawnOnAThreadPoolJoinsFromTheCallingThread();
+    joinReturnsAnOptional();
     joinRethrowsTheTaskException();
     joinMovesOutMoveOnlyResults();
     joinHandlesAreAwaitable();

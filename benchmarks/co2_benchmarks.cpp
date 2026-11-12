@@ -133,7 +133,7 @@ CO2_END
 double symmetricTaskTransfer() {
     constexpr int ops = 5000000;
     return nanosecondsPerOp(static_cast<std::size_t>(ops),
-                            [&] { sink = co2::syncWait(awaitsLeaves(ops)); });
+                            [&] { sink = *co2::syncWait(awaitsLeaves(ops)); });
 }
 
 double syncWaitReadyTask() {
@@ -141,7 +141,7 @@ double syncWaitReadyTask() {
     return nanosecondsPerOp(static_cast<std::size_t>(ops), [&] {
         long total = 0;
         for (auto index = 0; index != ops; ++index)
-            total += co2::syncWait(leaf(index));
+            total += *co2::syncWait(leaf(index));
         sink = total;
     });
 }
@@ -181,7 +181,7 @@ double awaitChildOnThreads(int const threads, bool const sharedToken) {
             workers.emplace_back([&shared, sharedToken] {
                 co2::stop_source own;
                 auto token = sharedToken ? shared.get_token() : own.get_token();
-                sink = co2::syncWait(awaitsLeaves(ops), std::move(token));
+                sink = *co2::syncWait(awaitsLeaves(ops), std::move(token));
             });
         }
         for (auto& worker : workers)
@@ -209,7 +209,7 @@ double manualExecutorHop() {
     return nanosecondsPerOp(static_cast<std::size_t>(ops), [&] {
         auto handle = co2::spawn(executor, hopper(executor, ops));
         executor.run();
-        sink = handle.join();
+        sink = *handle.join();
     });
 }
 
@@ -226,7 +226,7 @@ double threadPoolHops(unsigned const workers, int const tasks, int const hopsPer
             handles.push_back(co2::spawn(pool, hopper(pool, hopsPerTask)));
         long total = 0;
         for (auto& handle : handles)
-            total += handle.join();
+            total += *handle.join();
         sink = total;
     });
 }
@@ -242,7 +242,7 @@ double spawnAndJoin() {
     return nanosecondsPerOp(static_cast<std::size_t>(ops), [&] {
         long total = 0;
         for (auto index = 0; index != ops; ++index)
-            total += co2::spawn(pool, leaf(index)).join();
+            total += *co2::spawn(pool, leaf(index)).join();
         sink = total;
     });
 }

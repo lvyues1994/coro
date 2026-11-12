@@ -8,6 +8,8 @@
 #include "co2/coroutine.hpp"
 #include "co2/detail/result_storage.hpp"
 #include "co2/env.hpp"
+#include "co2/optional.hpp"
+#include "co2/result.hpp"
 #include "co2/stop_token.hpp"
 
 // co2：惰性、单消费者的 Task<T>。promise 与 cppcoro::task 逐字同形：
@@ -197,6 +199,12 @@ template <class T> Task<T> TaskPromise<T>::get_return_object() noexcept {
     return Task<T>{coroutine_handle<TaskPromise>::from_promise(*this)};
 }
 
+// 根（syncWait、JoinHandle::join）交给普通代码的类型：结果放进 optional，空表示已停止。
+// void 没有值可放，用 Unit 占位，这样 Task<void> 的根与其他根同形。
+template <class T> struct RootValue { using type = T; };
+template <> struct RootValue<void> { using type = Unit; };
+template <class T> using RootResult = optional<typename RootValue<T>::type>;
+
 // 根适配器（syncWait、spawn）启动 Task 的唯一入口：设置续体与根环境，然后恢复
 // （或交给 scheduler 恢复）。
 struct TaskAccess {
@@ -228,6 +236,11 @@ struct TaskAccess {
         return task.handle.promise().result();
     }
 
+    // 根取走结果（只可一次）。
+    template <class T> static RootResult<T> takeRootResult(Task<T>& task) {
+        return takeRootResult(task, std::is_void<T>{});
+    }
+
     template <class T> static bool hasError(Task<T> const& task) noexcept {
         return task.handle && task.handle.promise().error != nullptr;
     }
@@ -242,6 +255,17 @@ struct TaskAccess {
         auto const handle = task.handle;
         task.handle = nullptr;
         return handle;
+    }
+
+  private:
+    template <class T>
+    static RootResult<T> takeRootResult(Task<T>& task, std::false_type) {
+        return RootResult<T>{takeResult(task)};
+    }
+
+    static RootResult<void> takeRootResult(Task<void>& task, std::true_type) {
+        takeResult(task);
+        return RootResult<void>{Unit{}};
     }
 };
 

@@ -441,7 +441,7 @@ auto blocksOnItsChild(co2::ThreadPool& pool, int v) CO2_BEG(co2::Task<int>, (poo
     CO2_AWAIT(co2::scheduleOn(pool));
     // 在工作线程上阻塞式 join：子 Task 排在本线程的本地队列里，只剩它一项，而本线程
     // 不会回来取——必须有另一个工作线程被叫醒并把它偷走。
-    CO2_RETURN(co2::spawn(pool, doubles(pool, v)).join());
+    CO2_RETURN(*co2::spawn(pool, doubles(pool, v)).join());
 }
 CO2_END
 

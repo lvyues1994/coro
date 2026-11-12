@@ -164,7 +164,9 @@ token 的基准：240 → 20 ns/await）。等待者不是 co2 自己的 promise
   join。
 - **`ManualExecutor`**：互斥 FIFO；带排队工作销毁是契约违规。
 - **`syncWait`**：Task 在调用线程上内联启动；续体是一个不占堆的手写标准布局帧，被对称
-  转移到时标记完成并唤醒等待线程。
+  转移到时标记完成并唤醒等待线程。返回值照 `std::execution::sync_wait` 放在
+  `co2::optional` 里（`Task<void>` 是 `co2::optional<co2::Unit>`），`JoinHandle::join()`
+  同形。
 - **`spawn`**：给 Task 设好续体与 token 后直接把它的句柄排给 scheduler（惰性 Task
   本身就是可排队句柄，无跳板帧）。`JoinHandle` 与内嵌续体帧共享一个堆分配的
   `JoinState`；未完成时析构 = 请求停止并分离（P3149 `spawn_future`），Task 跑完后由

@@ -56,19 +56,23 @@ struct SyncWaitCompletion {
 
 } // namespace detail
 
-// 在调用线程上阻塞直到 Task 完成，返回其结果或重抛其异常。Task 在调用线程上内联启动；
-// 之后它在哪里运行由它自己的 scheduleOn 决定，完成时通过对称转移唤醒等待线程。
-// `token` 成为 Task 树的根 stop_token（体内 CO2_AWAIT_SET(t, getStopToken()) 可见）。
+// 在调用线程上阻塞直到 Task 完成。Task 在调用线程上内联启动；之后它在哪里运行由它自己
+// 的 scheduleOn 决定，完成时通过对称转移唤醒等待线程。`token` 成为 Task 树的根
+// stop_token（体内 CO2_AWAIT_SET(t, getStopToken()) 可见）。
 //
-// 与 std::execution::sync_wait 一样，它就是阻塞：在 scheduler 的工作线程上调用会占住
-// 该线程，Task 若依赖这个线程就会死锁。
-template <class T> T syncWait(Task<T> task, stop_token token = {}) {
+// 返回值照 std::execution::sync_wait：结果放在 co2::optional 里，Task<void> 是
+// co2::optional<co2::Unit>；空的 optional 表示已停止；Task 的异常在这里重抛。
+//
+// 与 sync_wait 一样，它就是阻塞：在 scheduler 的工作线程上调用会占住该线程，Task 若依赖
+// 这个线程就会死锁。
+template <class T>
+detail::RootResult<T> syncWait(Task<T> task, stop_token token = {}) {
     CO2_CONTRACT_CHECK(task);
     detail::SyncWaitState state;
     detail::SyncWaitCompletion completion{state};
     detail::TaskAccess::start(task, completion.handle(), std::move(token));
     state.wait();
-    return detail::TaskAccess::takeResult(task);
+    return detail::TaskAccess::takeRootResult(task);
 }
 
 namespace detail {
@@ -112,11 +116,11 @@ Task<void> wrapAwaitable(Awaitable&& awaitable, std::true_type) {
 // 任意 awaitable 的同步等待：在一个临时 Task 里 co_await 它。
 template <class Awaitable, class = typename std::enable_if<not detail::IsTask<
                                typename std::decay<Awaitable>::type>::value>::type>
-detail::AwaitResultOf<Awaitable> syncWait(Awaitable&& awaitable,
-                                          stop_token token = {}) {
-    using Result = detail::AwaitResultOf<Awaitable>;
-    return syncWait(detail::wrapAwaitable<Result>(std::forward<Awaitable>(awaitable),
-                                                  std::is_void<Result>{}),
+detail::RootResult<detail::AwaitResultOf<Awaitable>> syncWait(Awaitable&& awaitable,
+                                                              stop_token token = {}) {
+    using Awaited = detail::AwaitResultOf<Awaitable>;
+    return syncWait(detail::wrapAwaitable<Awaited>(std::forward<Awaitable>(awaitable),
+                                                   std::is_void<Awaited>{}),
                     std::move(token));
 }
 

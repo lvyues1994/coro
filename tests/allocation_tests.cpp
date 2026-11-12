@@ -169,7 +169,7 @@ void whenAllTupleAllocatesChildFramesStopStateAndAwaiterSlot() {
     // 3 个子帧 + 1 个 stop 状态 + 1 次 awaiter 槽回落（awaiter 内嵌每个 child
     // 的续体帧， 远大于 64 字节的内联槽）；syncWait(awaitable) 另需 1 个包装 Task 帧。
     CHECK_ALLOCATIONS(6, {
-        auto const results = co2::syncWait(co2::whenAll(leaf(1), leaf(2), leaf(3)));
+        auto const results = *co2::syncWait(co2::whenAll(leaf(1), leaf(2), leaf(3)));
         CHECK(std::get<0>(results) + std::get<1>(results) + std::get<2>(results) == 6);
     });
 }
@@ -255,7 +255,7 @@ CO2_END
 
 void oversizedCallbackAwaiterFallsBackToOneHeapAllocation() {
     // 帧 1 + awaiter 槽回落 1。
-    CHECK_ALLOCATIONS(2, CHECK(co2::syncWait(viaWideCallback()).words[7] == &wideSentinel));
+    CHECK_ALLOCATIONS(2, CHECK(co2::syncWait(viaWideCallback())->words[7] == &wideSentinel));
 }
 
 auto viaCallbackWithLargeClosure(std::unique_ptr<int> payload, int a, int b)

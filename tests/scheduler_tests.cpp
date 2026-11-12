@@ -7,11 +7,14 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "co2/coroutine.hpp"
 #include "co2/manual_executor.hpp"
+#include "co2/optional.hpp"
+#include "co2/result.hpp"
 #include "co2/scheduler.hpp"
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
@@ -105,6 +108,28 @@ void syncWaitRunsASynchronousTaskInline() {
     CHECK(counter == 1);
 }
 
+// 根的返回值照 std::execution::sync_wait：结果放在 optional 里，void 用 Unit 占位。
+void syncWaitReturnsAnOptional() {
+    static_assert(
+        std::is_same<decltype(co2::syncWait(answer(7))), co2::optional<int>>::value,
+        "syncWait(Task<int>) must return co2::optional<int>");
+    static_assert(std::is_same<decltype(co2::syncWait(std::declval<co2::Task<>>())),
+                               co2::optional<co2::Unit>>::value,
+                  "syncWait(Task<void>) must return co2::optional<co2::Unit>");
+    static_assert(std::is_same<decltype(co2::syncWait(co2::suspend_never{})),
+                               co2::optional<co2::Unit>>::value,
+                  "syncWait(awaitable) must return an optional as well");
+
+    co2::optional<int> const value = co2::syncWait(answer(7));
+    CHECK(value.has_value());
+    CHECK(*value == 7);
+
+    int counter = 0;
+    co2::optional<co2::Unit> const done = co2::syncWait(nothing(counter));
+    CHECK(done.has_value());
+    CHECK(counter == 1);
+}
+
 void syncWaitRethrowsTheTaskException() {
     bool thrown = false;
     try {
@@ -121,7 +146,7 @@ auto uniqueAnswer() CO2_BEG(co2::Task<std::unique_ptr<int>>, ()) {
 CO2_END
 
 void syncWaitMovesOutMoveOnlyResults() {
-    auto result = co2::syncWait(uniqueAnswer());
+    auto result = *co2::syncWait(uniqueAnswer());
     CHECK(result != nullptr && *result == 3);
 }
 
@@ -176,6 +201,7 @@ int main() {
     scheduleOnSuspendsUntilTheExecutorRuns();
     manualExecutorIsFifoAndRunDrainsRescheduledWork();
     syncWaitRunsASynchronousTaskInline();
+    syncWaitReturnsAnOptional();
     syncWaitRethrowsTheTaskException();
     syncWaitMovesOutMoveOnlyResults();
     syncWaitWakesWhenTheTaskCompletesOnAnotherThread();

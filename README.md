@@ -191,19 +191,25 @@ pool.isWorkerThread();                       // 当前线程是否是它的工�
 ### `syncWait`
 
 ```cpp
-T result = co2::syncWait(task);            // 阻塞到完成，重抛异常
-T result = co2::syncWait(task, token);     // token 成为 Task 树的根 stop_token
+co2::optional<T> result = co2::syncWait(task);         // 阻塞到完成，重抛异常
+co2::optional<T> result = co2::syncWait(task, token);  // token 成为 Task 树的根 stop_token
 ```
 
 Task 在调用线程上内联启动，完成时对称转移到一个不占堆的续体帧唤醒等待线程。与
 `std::execution::sync_wait` 一样，它就是阻塞。
+
+返回值也照 `sync_wait`：结果放在 `co2::optional` 里，`Task<void>` 是
+`co2::optional<co2::Unit>`。取值写 `*result`；与值比较可以直接写
+`co2::syncWait(task) == 42`。空的 optional 留给"已停止"这种结果——目前还没有任何操作
+会以已停止完成，所以它总是有值。结果是 `bool` 的根不要直接当条件用：
+`if (co2::syncWait(task))` 判断的是"有没有值"，不是值本身。
 
 ### `spawn` / `JoinHandle<T>`
 
 ```cpp
 auto handle = co2::spawn(pool, work());          // 惰性 Task 直接排给 scheduler
 handle.requestStop();                            // 协作式取消
-T value = handle.join();                         // 阻塞
+co2::optional<T> value = handle.join();          // 阻塞；返回值与 syncWait 同形
 CO2_AWAIT_SET(value, handle);                    // 或在协程里等待（左值借用/右值拥有）
 co2::spawn(pool, work(), parentToken);           // 父 token 的停止请求转发过来
 ```
