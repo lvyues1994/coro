@@ -1,7 +1,9 @@
 #pragma once
 
 // 协程 DSL 使用的小型无依赖预处理器子集。
-// 捕获 tuple 当前支持零到八个参数名。
+//
+// 两个上限：捕获 tuple 支持零到八个参数名（FOR_EACH）；按实参个数做选择的宏最多接受
+// 64 个实参（ARG_65，见下）。
 
 // 下面的宏依赖标准的 __VA_ARGS__ 展开。MSVC 的传统预处理器把 __VA_ARGS__ 当成单个记号
 // 传给嵌套宏，IS_PAREN / NARG / IS_EMPTY 会全部失效，报出一堆 C4002/C4003 与后续语法
@@ -37,10 +39,27 @@
 #define CO2_DETAIL_PP_REMOVE_PARENS_0(value) value
 #define CO2_DETAIL_PP_REMOVE_PARENS_1(value) CO2_DETAIL_PP_REMOVE_PARENS_I value
 
-#define CO2_DETAIL_PP_HAS_COMMA(...)                                                   \
-    CO2_DETAIL_PP_HAS_COMMA_I(__VA_ARGS__, 1, 1, 1, 1, 1, 1, 1, 1, 0, ~)
-#define CO2_DETAIL_PP_HAS_COMMA_I(_0, _1, _2, _3, _4, _5, _6, _7, _8, result, ...)     \
+// 按实参个数做选择的宏（HAS_COMMA，以及 dsl.hpp 里 CO2_BEG / CO2_BEG_WITH_ALLOCATOR 的
+// 分支选择）都落在这一个取数宏上：它返回第 65 个实参，所以这些宏最多接受 64 个实参——
+// 局部列表、CO2_RETURN 的表达式里的顶层逗号（模板实参、花括号初始化）都算在内。超过
+// 上限时用圆括号或类型别名把逗号包起来。C++ 实现至少支持 256 个宏实参。
+//
+// 外层多转发一次：实参里的 CO2_DETAIL_PP_REPEAT_60 先展开，再重新按逗号切分。
+#define CO2_DETAIL_PP_ARG_65(...) CO2_DETAIL_PP_ARG_65_I(__VA_ARGS__)
+#define CO2_DETAIL_PP_ARG_65_I(                                                        \
+    _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18,   \
+    _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, _33, _34,    \
+    _35, _36, _37, _38, _39, _40, _41, _42, _43, _44, _45, _46, _47, _48, _49, _50,    \
+    _51, _52, _53, _54, _55, _56, _57, _58, _59, _60, _61, _62, _63, _64, result, ...) \
     result
+#define CO2_DETAIL_PP_REPEAT_60(x)                                                     \
+    x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x,   \
+        x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x,  \
+        x, x, x, x, x, x, x
+
+// 实参里有顶层逗号（即实参不止一个）时为 1。
+#define CO2_DETAIL_PP_HAS_COMMA(...)                                                   \
+    CO2_DETAIL_PP_ARG_65(__VA_ARGS__, CO2_DETAIL_PP_REPEAT_60(1), 1, 1, 1, 0, ~)
 
 #define CO2_DETAIL_PP_EMPTY_TRIGGER(...) ,
 #define CO2_DETAIL_PP_PASTE5(a, b, c, d, e) CO2_DETAIL_PP_PASTE5_I(a, b, c, d, e)

@@ -63,6 +63,8 @@ int main() { return co2::syncWait(twice(21)) == 42 ? 0 : 1; }
   `switch` 语句里（编译错误：状态机的 `case` 标签会绑到最近一层 switch）。
 - `co_await` 只能是语句或赋值右侧；一行一个挂起点（标签取 `__LINE__`，保证头文件
   里的 inline/模板协程体不违反 ODR）。
+- 宏的上限：捕获列表最多 8 个参数；`CO2_BEG` 的局部列表和 `CO2_RETURN` 的表达式里，
+  每个顶层逗号（模板实参、花括号初始化里的）都算一个宏实参，总数不超过 64。
 - awaitable 表达式里的**临时对象活不过挂起点**，只有 awaiter 本身被放进帧。awaiter
   不能借用表达式里其他临时对象；`Generator` 因此把 yield 的 prvalue 移进帧保存。
 - `operator co_await` 拼作 `operator_co_await`（C++20 构建下两种拼写都被查找）。

@@ -1,6 +1,7 @@
 // 边角用例：宏的逃生口、大 awaiter 的堆回落、生成器与 stop_token 的生命周期边界、
 // 跨线程的 AsyncGenerator、外部多线程并发提交、嵌套 spawn。
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -87,6 +88,38 @@ CO2_END
 
 void awaitAsAcceptsExpressionsWithLambdas() {
     CHECK(co2::syncWait(usesAwaitAs(41)) == 42);
+}
+
+// ---------------------------------------------------------------------------
+// 局部列表与 CO2_RETURN 的实参里可以有很多顶层逗号（模板实参、花括号初始化）。宏按
+// 实参个数选择展开分支，个数上限是 64，而不是早先的 8。
+
+auto manyCommas()
+    CO2_BEG((co2::Task<std::array<int, 12>>), (), std::pair<int, int> a{1, 2};
+            std::pair<int, int> b{3, 4}; std::pair<int, int> c{5, 6};
+            std::pair<int, int> d{7, 8}; std::pair<int, int> e{9, 10};
+            std::pair<int, int> f{11, 12};) {
+    CO2_RETURN(std::array<int, 12>{{a.first, a.second, b.first, b.second, c.first,
+                                    c.second, d.first, d.second, e.first, e.second,
+                                    f.first, f.second}});
+}
+CO2_END
+
+auto manyCommasWithAllocator()
+    CO2_BEG_WITH_ALLOCATOR(co2::Task<int>, std::allocator<unsigned char>{}, (),
+                           std::pair<int, int> a{1, 2}; std::pair<int, int> b{3, 4};
+                           std::pair<int, int> c{5, 6}; std::pair<int, int> d{7, 8};
+                           std::pair<int, int> e{9, 10};
+                           std::pair<int, int> f{11, 12};) {
+    CO2_RETURN(a.first + b.first + c.first + d.first + e.first + f.second);
+}
+CO2_END
+
+void macroArgumentsMayContainManyTopLevelCommas() {
+    auto const values = co2::syncWait(manyCommas());
+    for (auto index = std::size_t{}; index != values.size(); ++index)
+        CHECK(values[index] == static_cast<int>(index) + 1);
+    CHECK(co2::syncWait(manyCommasWithAllocator()) == 1 + 3 + 5 + 7 + 9 + 12);
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +479,7 @@ void spawnedTasksMaySpawnAndAwaitOnTheSamePool() {
 
 int main() {
     awaitAsAcceptsExpressionsWithLambdas();
+    macroArgumentsMayContainManyTopLevelCommas();
     largeAwaitersFallBackToTheHeapTransparently();
     unstartedGeneratorReleasesItsParameters();
     generatorThrowingBeforeTheFirstYieldThrowsFromBegin();

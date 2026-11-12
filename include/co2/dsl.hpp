@@ -91,13 +91,14 @@
                         __VA_ARGS__)
 #define CO2_DETAIL_BEG_WITHOUT_LOCALS(return_type, captures)                           \
     CO2_DETAIL_BEG_IMPL(return_type, ::co2::detail::DefaultFrameAllocator{}, captures, )
-#define CO2_DETAIL_BEG_SELECT(_1, _2, _3, _4, _5, _6, _7, _8, selected, ...) selected
+// 两个实参（返回类型、捕获列表）走 WITHOUT_LOCALS，三个及以上走 WITH_LOCALS。局部列表
+// 里的每个顶层逗号都会多出一个宏实参；总数上限 64，见 preprocessor.hpp。
 #define CO2_BEG(...)                                                                   \
-    CO2_DETAIL_BEG_SELECT(__VA_ARGS__, CO2_DETAIL_BEG_WITH_LOCALS,                     \
-                          CO2_DETAIL_BEG_WITH_LOCALS, CO2_DETAIL_BEG_WITH_LOCALS,      \
-                          CO2_DETAIL_BEG_WITH_LOCALS, CO2_DETAIL_BEG_WITH_LOCALS,      \
-                          CO2_DETAIL_BEG_WITH_LOCALS, CO2_DETAIL_BEG_WITHOUT_LOCALS,   \
-                          CO2_DETAIL_BEG_WITHOUT_LOCALS, ~)                            \
+    CO2_DETAIL_PP_ARG_65(__VA_ARGS__,                                                  \
+                         CO2_DETAIL_PP_REPEAT_60(CO2_DETAIL_BEG_WITH_LOCALS),          \
+                         CO2_DETAIL_BEG_WITH_LOCALS, CO2_DETAIL_BEG_WITH_LOCALS,       \
+                         CO2_DETAIL_BEG_WITHOUT_LOCALS, CO2_DETAIL_BEG_WITHOUT_LOCALS, \
+                         ~)                                                            \
     (__VA_ARGS__)
 
 // 用调用方提供的 allocator 分配协程帧（std::allocator_arg 约定的宏形式）。allocator
@@ -106,14 +107,12 @@
     CO2_DETAIL_BEG_IMPL(return_type, allocator, captures, __VA_ARGS__)
 #define CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS(return_type, allocator, captures)          \
     CO2_DETAIL_BEG_IMPL(return_type, allocator, captures, )
-#define CO2_DETAIL_BEG_ALLOC_SELECT(_1, _2, _3, _4, _5, _6, _7, _8, _9, selected, ...) \
-    selected
+// 三个实参（返回类型、allocator、捕获列表）走 WITHOUT_LOCALS，四个及以上走 WITH_LOCALS。
 #define CO2_BEG_WITH_ALLOCATOR(...)                                                    \
-    CO2_DETAIL_BEG_ALLOC_SELECT(                                                       \
-        __VA_ARGS__, CO2_DETAIL_BEG_ALLOC_WITH_LOCALS,                                 \
-        CO2_DETAIL_BEG_ALLOC_WITH_LOCALS, CO2_DETAIL_BEG_ALLOC_WITH_LOCALS,            \
-        CO2_DETAIL_BEG_ALLOC_WITH_LOCALS, CO2_DETAIL_BEG_ALLOC_WITH_LOCALS,            \
-        CO2_DETAIL_BEG_ALLOC_WITH_LOCALS, CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS, ~, ~)   \
+    CO2_DETAIL_PP_ARG_65(                                                              \
+        __VA_ARGS__, CO2_DETAIL_PP_REPEAT_60(CO2_DETAIL_BEG_ALLOC_WITH_LOCALS),        \
+        CO2_DETAIL_BEG_ALLOC_WITH_LOCALS, CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS,         \
+        CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS, CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS, ~)   \
     (__VA_ARGS__)
 
 // 挂起点标签取自 __LINE__：头文件中的 inline/模板协程体在每个翻译单元展开出相同的
