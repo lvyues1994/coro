@@ -84,6 +84,15 @@ void inheritStopToken(EnvStopToken& into,
     inheritFromHandle(into, awaiting, std::is_void<Promise>{});
 }
 
+// 等待者的环境里有没有停止请求。等待者没有令牌（自定义 promise、类型擦除的句柄）时
+// 为假。取消点用它：stopIfRequested()。
+template <class Promise>
+bool stopRequestedOf(coroutine_handle<Promise> const awaiting) noexcept {
+    EnvStopToken token;
+    inheritStopToken(token, awaiting);
+    return token.stopRequested();
+}
+
 // co_await getStopToken() 的 awaiter：不挂起，返回 promise 持有的 token。
 struct StopTokenAwaiter {
     stop_token token;

@@ -358,6 +358,12 @@ struct EnvStopToken {
     // 一个独立的、持有引用的 token：交给用户代码、stop_callback 或另起的根。
     stop_token get() const noexcept { return stop_token{state()}; }
 
+    // 有没有停止请求。没有令牌时为假。只读一次原子量，不碰引用计数。
+    bool stopRequested() const noexcept {
+        auto* const shared = state();
+        return shared != nullptr && shared->stopRequested();
+    }
+
     void reset() noexcept {
         if ((bits & ownedBit) != 0U) state()->release();
         bits = 0U;

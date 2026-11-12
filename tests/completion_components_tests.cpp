@@ -406,6 +406,71 @@ void anErrorCodeFromACallbackRaisesForACallerThatSkipsAwaitCompletion() {
     CHECK(sawCode);
 }
 
+// ---------------------------------------------------------------------------
+// 已停止的产生方：just_stopped 与 stopIfRequested
+
+auto stopsItself(bool& reached) CO2_BEG(co2::Task<int>, (reached)) {
+    CO2_AWAIT(co2::just_stopped());
+    reached = true;
+    CO2_RETURN(0);
+}
+CO2_END
+
+void justStoppedEndsTheTaskAsStopped() {
+    auto reached = false;
+    CHECK(not co2::syncWait(stopsItself(reached)).has_value());
+    CHECK(not reached);
+}
+
+auto passesTwoCancellationPoints(co2::stop_source& source, int& passed)
+    CO2_BEG(co2::Task<int>, (source, passed)) {
+    CO2_AWAIT(co2::stopIfRequested()); // 还没有请求：继续
+    ++passed;
+    source.request_stop();
+    CO2_AWAIT(co2::stopIfRequested()); // 有请求了：到此为止
+    ++passed;
+    CO2_RETURN(passed);
+}
+CO2_END
+
+void stopIfRequestedIsACancellationPoint() {
+    co2::stop_source source;
+    auto passed = 0;
+    auto const result =
+        co2::syncWait(passesTwoCancellationPoints(source, passed), source.get_token());
+    CHECK(not result.has_value());
+    CHECK(passed == 1);
+}
+
+// 这棵 Task 树的根没有拿到令牌：别处的停止请求与它无关，取消点什么也不做。
+void stopIfRequestedDoesNothingWithoutAToken() {
+    co2::stop_source unrelated;
+    auto passed = 0;
+    CHECK(co2::syncWait(passesTwoCancellationPoints(unrelated, passed)) == 2);
+}
+
+auto stopsWhenAsked() CO2_BEG(co2::Task<int>, ()) {
+    CO2_AWAIT(co2::stopIfRequested());
+    CO2_RETURN(1);
+}
+CO2_END
+
+// 父的停止请求经 whenAll 转发给每个 child；child 在取消点结束，whenAll 以已停止完成。
+void aParentsStopRequestStopsWhenAllThroughItsChildren() {
+    co2::stop_source source;
+    auto reached = false;
+    CHECK(co2::syncWait(awaitsBoth(stopsWhenAsked(), stopsWhenAsked(), reached),
+                        source.get_token()) == 2);
+    CHECK(reached);
+
+    CHECK(source.request_stop());
+    reached = false;
+    CHECK(not co2::syncWait(awaitsBoth(stopsWhenAsked(), stopsWhenAsked(), reached),
+                            source.get_token())
+                  .has_value());
+    CHECK(not reached);
+}
+
 } // namespace
 
 int main() {
@@ -422,5 +487,9 @@ int main() {
     theContinuationHasFourExits();
     anApiThatFinishesLaterCanReportStopped();
     anErrorCodeFromACallbackRaisesForACallerThatSkipsAwaitCompletion();
+    justStoppedEndsTheTaskAsStopped();
+    stopIfRequestedIsACancellationPoint();
+    stopIfRequestedDoesNothingWithoutAToken();
+    aParentsStopRequestStopsWhenAllThroughItsChildren();
     return 0;
 }
