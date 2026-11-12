@@ -87,7 +87,8 @@ int main() { return co2::syncWait(twice(21)) == 42 ? 0 : 1; }
 ### `Task<T>`
 
 惰性、单消费者、只可移动。等待子 Task 是对称转移（栈深不随链长增长）；子 Task 完成时
-对称转移回等待者；异常在等待者处重抛。
+对称转移回等待者。子 Task 出错时，等待它的协程以同一个错误结束，逐层向上，到根上才
+变回异常——见"错误：按值向上传"。
 
 ```cpp
 #include <co2/task.hpp>
@@ -159,6 +160,62 @@ CO2_END
 每一步都是生产者与消费者之间的对称转移，没有同步；消费者在生产者 yield 所在的线程
 上恢复。有 `next()` 未完成时销毁是契约违规。
 
+## 错误：按值向上传
+
+一个 Task 以值、错误或已停止结束。错误是一个 `co2::Error`：要么是一个
+`std::error_code`，要么是一个被捕获的异常。
+
+```cpp
+#include <co2/as_result.hpp>
+#include <co2/just.hpp>
+
+auto readHeader(Socket& socket) CO2_BEG(co2::Task<Header>, (socket), Header header;) {
+    if (not socket.isOpen())
+        CO2_AWAIT(co2::just_error(NetErrc::closed));   // 本协程以这个错误结束
+    CO2_AWAIT_SET(header, socket.read());
+    CO2_RETURN(header);
+}
+CO2_END
+
+auto serve(Socket& socket)
+    CO2_BEG(co2::Task<>, (socket), Header header;
+            co2::optional<co2::Result<Header>> attempt;) {
+    CO2_AWAIT_SET(header, readHeader(socket));   // 出错：到此为止，以同一个错误结束
+    CO2_AWAIT_SET(attempt, co2::asResult(readHeader(socket)));   // 想自己处理
+    if (attempt->hasError()) log(attempt->error().code());
+}
+CO2_END
+```
+
+- **普通的 `CO2_AWAIT` 向上传播。** 被等待的操作出错时，其后的语句不执行，局部按逆序
+  析构，当前协程以同一个错误结束并交给等待它的协程。中间各层既不抛也不接——挂起点
+  本来就不能放进 `try` 块。
+- **协程体里 `throw` 等同于以错误结束。** 异常只被捕获一次，此后按值传。
+- **到根上才变回异常。** `syncWait` / `join()` 重抛原来的异常；错误码则抛
+  `std::system_error`。不想要异常就写 `co2::syncWait(co2::asResult(task))`，得到
+  `co2::optional<co2::Result<T>>`，三种结果都是值。
+- **想自己处理就套 `asResult`。** 得到 `co2::Result<T>`：`hasValue()` / `hasError()` /
+  `isStopped()`。它不能默认构造，作帧局部时写成 `co2::optional<co2::Result<T>>`。
+- **自己的错误枚举**按 `<system_error>` 的常规方式接入（`std::is_error_code_enum` 的
+  特化加 `make_error_code`），之后可以直接传给 `just_error`。
+  `CO2_YIELD(co2::with_error(e))` 是 P3552 的拼写，效果相同。
+
+写 awaiter 与 promise 的人各多一个可选的扩展点：
+
+- awaiter 可以提供 `co2::Completion await_completion() noexcept`，报告这次等待是有值、
+  出错还是已停止。恢复点先问它，有值才调用 `await_resume()`。没有这个成员的 awaiter
+  行为不变。**包装别的 awaiter 的 awaiter 要把它一并转发**：不转发时，被包住的操作
+  出错仍然从 `await_resume()` 抛出（与从前相同），以已停止完成则是契约违规。
+- promise 可以提供 `void return_error(co2::Error) noexcept` 与
+  `void return_stopped() noexcept` 接收后两种结果。没有 `return_error()` 时错误在
+  协程体内重新抛出，走 `unhandled_exception()`；没有 `return_stopped()` 时"已停止"是
+  契约违规。
+
+"已停止"目前只有自己写的 awaiter 能产生；`whenAll`、`JoinHandle`、`AsyncGenerator`、
+`fromCallback` 也还没有接上 `await_completion()`——它们遇到错误仍然从
+`await_resume()` 抛出，结果相同，只是多一次抛接。完整的设计与落地顺序见
+`docs/design/completion-channels.md`。
+
 ## 执行层
 
 ### `Scheduler` 与 `scheduleOn`
@@ -200,9 +257,9 @@ Task 在调用线程上内联启动，完成时对称转移到一个不占堆的
 
 返回值也照 `sync_wait`：结果放在 `co2::optional` 里，`Task<void>` 是
 `co2::optional<co2::Unit>`。取值写 `*result`；与值比较可以直接写
-`co2::syncWait(task) == 42`。空的 optional 留给"已停止"这种结果——目前还没有任何操作
-会以已停止完成，所以它总是有值。结果是 `bool` 的根不要直接当条件用：
-`if (co2::syncWait(task))` 判断的是"有没有值"，不是值本身。
+`co2::syncWait(task) == 42`。空的 optional 表示 Task 以已停止结束；Task 出错时在这里
+抛出。结果是 `bool` 的根不要直接当条件用：`if (co2::syncWait(task))` 判断的是"有没有
+值"，不是值本身。
 
 ### `spawn` / `JoinHandle<T>`
 
@@ -295,6 +352,8 @@ co2::setContractViolationHandler([](co2::ContractViolation const& v) {
 | `co2/coroutine_handle.hpp` | `coroutine_handle<P>`、`suspend_always/never`、`noop_coroutine`、`coroutine_traits` |
 | `co2/dsl.hpp` | `CO2_*` 宏 |
 | `co2/task.hpp` / `generator.hpp` / `async_generator.hpp` | 返回类型 |
+| `co2/error.hpp` / `completion.hpp` / `result.hpp` / `optional.hpp` | `Error`、`Completion`、`Result<T>` 与 `Unit`、`optional<T>` |
+| `co2/just.hpp` / `as_result.hpp` | `just_error` / `with_error`、`asResult` |
 | `co2/scheduler.hpp` / `manual_executor.hpp` / `thread_pool.hpp` | 执行层 |
 | `co2/sync_wait.hpp` / `spawn.hpp` | 根适配器 |
 | `co2/when_all.hpp` / `callback.hpp` | 组合器 `whenAll`、回调适配 `fromCallback` |
@@ -321,9 +380,9 @@ i7-13700KF，每项 7 轮取中位数：
 | raw suspend/resume | 1.0 |
 | Generator yield/next | 1.5 |
 | elements_of 深度 8 yield/next | 1.9 |
-| symmetric Task transfer（含帧分配） | 11.9 |
-| syncWait ready Task | 25.4 |
-| Task 链上的失败，100 层，每层 | 558 |
+| symmetric Task transfer（含帧分配） | 12.0 |
+| syncWait ready Task | 26.7 |
+| Task 链上的失败，100 层，每层 | 45.3 |
 | Task 等待子 Task，8 线程各自的 stop_token | 19.3 |
 | Task 等待子 Task，8 线程共享一个 stop_token | 18.2 |
 | ManualExecutor hop | 20.1 |
@@ -331,6 +390,8 @@ i7-13700KF，每项 7 轮取中位数：
 | ThreadPool hop（4 workers，32 Task 聚合） | 3.5 |
 | ThreadPool hop（8 workers，1 Task，不饱和） | 14.5 |
 | spawn + join（跨线程唤醒） | 2542 |
+
+"Task 链上的失败"在错误改为按值传播之前是 558：那时每一层都要重抛一次异常。
 
 线程池的几项对机器负载敏感：同一台机器上有其他负载时，不饱和那一项在 17～30 ns 之间
 浮动。数字只在同一台机器、同一份编译选项下可比。

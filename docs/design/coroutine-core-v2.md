@@ -528,6 +528,13 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
   类内声明、类外定义。在没有 `this` 的函数里用 `CO2_BEG_MEMBER` 是编译错误。
 - **D14 宏实参的个数**：捕获列表最多 8 个参数；`CO2_BEG` 的局部列表与 `CO2_RETURN` 的
   表达式里每个顶层逗号都多算一个宏实参，总数上限 64（`detail/preprocessor.hpp`）。
+- **D15 `await_completion()` 与 promise 的两个入口**：这一条不是"没有编译器"逼出来的，
+  而是有意的扩展（`completion-channels.md`）。awaiter 可以多一个成员
+  `co2::Completion await_completion() noexcept`；恢复点在 `await_resume()` 之前调用它，
+  出错或已停止时不调用 `await_resume()`，而是结束协程并把结果交给 promise 的
+  `return_error()` / `return_stopped()`。没有这个成员的 awaiter、没有这两个入口的
+  promise 走的仍是标准路径，差分测试不受影响；原生 `co_await` 不认识这个成员，所以
+  库内 awaiter 的 `await_resume()` 在出错时照旧抛出。
 
 除此之外的任何差异都应视为缺陷。
 

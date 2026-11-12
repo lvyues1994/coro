@@ -88,6 +88,13 @@ Allocator（只有带状态的 allocator 才在帧里留副本）
 final_suspend()`。异常离开协程体走标准的 `unhandled_exception` 路径；初始挂起点之前的
 异常销毁帧并抛给调用方。
 
+恢复点比标准多一步（`docs/design/completion-channels.md`）：awaiter 有可选成员
+`await_completion()` 时，先问它这次等待是有值、出错还是已停止。有值照常
+`await_resume()`；否则协程就此结束——销毁 awaiter、析构局部、把结果交给 promise 的
+`return_error()` / `return_stopped()`、`co_await final_suspend()`，顺序与异常逃出
+协程体时相同。promise 没有 `return_error()` 时错误在体内重新抛出，所以为标准写的
+promise 不受影响。
+
 `await_suspend` 收到的是**带类型的** `coroutine_handle<Promise>`，因此 awaiter 可以像
 标准一样以模板 `await_suspend` 查询等待者的 promise（co2 用它传播环境）。
 
@@ -116,8 +123,11 @@ final_suspend()`。异常离开协程体走标准的 `unhandled_exception` 路�
   `await_suspend` 里写入 `continuation` 后对称转移进 child；`FinalAwaiter` 转移回等待者。
   惰性 + 先写续体再转移，让"完成 vs 挂起"没有竞争窗口，Task 不需要原子量。右值
   Task 自身是 awaiter（拥有 child 帧——宏展开里的临时对象活不过挂起点，见设计稿
-  D10），左值经 `operator_co_await() &` 借用。`T`/`void` 只有一份 promise
-  （`ResultStorage<T>` + SFINAE 二选一的 `return_value`/`return_void`）。
+  D10），左值经 `operator_co_await() &` 借用。`T`/`void` 只有一份 promise（SFINAE
+  二选一的 `return_value`/`return_void`）。结果是四态——空、值、错误、已停止——值与
+  错误共用一块存储（`TaskStorage<T>`），状态标记与 `started` 相邻，promise 与只存
+  `exception_ptr` 时一样大。错误与已停止按值沿等待链向上传，根上才变回异常或空的
+  optional；体内的异常在 `unhandled_exception()` 里被捕获一次。
 - **`Generator<Ref, V>`**：`std::generator` 同形。所有嵌套层共享根 promise 上的
   `current`（当前元素指针）与 `active`（最内层活动协程）；消费者的 `++` 直接恢复
   `active`，内层 `final_suspend` 把 `active` 改回父层并对称转移过去。嵌套生成器由父层
