@@ -1,0 +1,119 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 21,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/presets/${presetName}"
+        },
+        {
+            "name": "debug-gcc",
+            "displayName": "Debug (GCC)",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_COMPILER": "g++"
+            }
+        },
+        {
+            "name": "debug-clang",
+            "displayName": "Debug (Clang)",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_COMPILER": "clang++"
+            }
+        },
+        {
+            "name": "asan",
+            "displayName": "ASan + UBSan",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+            }
+        },
+        {
+            "name": "tsan",
+            "displayName": "TSan",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g"
+            }
+        },
+        {
+            "name": "release-bench",
+            "displayName": "Release benchmarks (-O2)",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_CXX_FLAGS_RELEASE": "-O2 -DNDEBUG",
+                "CO2_BUILD_BENCHMARKS": "ON",
+                "CO2_BUILD_TESTS": "OFF"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug-gcc",
+            "configurePreset": "debug-gcc"
+        },
+        {
+            "name": "debug-clang",
+            "configurePreset": "debug-clang"
+        },
+        {
+            "name": "asan",
+            "configurePreset": "asan"
+        },
+        {
+            "name": "tsan",
+            "configurePreset": "tsan"
+        },
+        {
+            "name": "release-bench",
+            "configurePreset": "release-bench"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "debug-gcc",
+            "configurePreset": "debug-gcc",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "debug-clang",
+            "configurePreset": "debug-clang",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "asan",
+            "configurePreset": "asan",
+            "output": {
+                "outputOnFailure": true
+            },
+            "environment": {
+                "ASAN_OPTIONS": "detect_leaks=0",
+                "UBSAN_OPTIONS": "print_stacktrace=1"
+            }
+        },
+        {
+            "name": "tsan",
+            "configurePreset": "tsan",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

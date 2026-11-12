@@ -278,8 +278,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-也可以使用仓库中的 CMake Preset：`debug-gcc`、`debug-clang`（构建与测试）、
-`release-bench`（性能基准）。
+也可以使用仓库中的 CMake Preset（需要 CMake 3.21 与 Ninja）：`debug-gcc`、
+`debug-clang`、`asan`、`tsan`（构建与测试，例如 `cmake --preset debug-gcc &&
+cmake --build --preset debug-gcc && ctest --preset debug-gcc`）、`release-bench`
+（性能基准）。
 
 测试包括规范用例套件（对 [dcl.fct.def.coroutine] / [expr.await] / [coroutine.handle]
 逐条）、C++20 构建下与原生 `co_await` 的差分测试、以及三个通过契约处理器以退出码
