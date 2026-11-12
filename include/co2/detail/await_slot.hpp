@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "co2/config.hpp"
+#include "co2/detail/over_aligned.hpp"
 
 namespace co2 {
 namespace detail {
@@ -19,7 +20,8 @@ struct AwaitSlotInline
 
 // 同一时间每个 frame 中只有一个 awaiter。小 awaiter 内联保存以维持单次分配的 frame
 // 模型；超过内联容量或对齐要求的 awaiter 退化为一次堆分配，而不是要求全局重定义
-// CO2_AWAIT_STORAGE_SIZE——那个宏在不同翻译单元取不同值会改变 frame 布局。
+// CO2_AWAIT_STORAGE_SIZE——那个宏在不同翻译单元取不同值会改变 frame 布局。超对齐的
+// awaiter 在堆上手工对齐（HeapObject）。
 template <std::size_t Capacity = CO2_AWAIT_STORAGE_SIZE> struct AwaitSlot {
     static_assert(
         Capacity >= sizeof(void*),
@@ -91,7 +93,7 @@ template <std::size_t Capacity = CO2_AWAIT_STORAGE_SIZE> struct AwaitSlot {
 
     template <class T>
     static void destroyImpl(void* const slot, std::false_type) noexcept {
-        delete *static_cast<T**>(slot);
+        HeapObject<T>::destroy(*static_cast<T**>(slot));
     }
 
     template <class T, class Value> T& emplaceImpl(Value&& value, std::true_type) {
@@ -102,10 +104,10 @@ template <std::size_t Capacity = CO2_AWAIT_STORAGE_SIZE> struct AwaitSlot {
     }
 
     template <class T, class Value> T& emplaceImpl(Value&& value, std::false_type) {
-        auto owned = std::unique_ptr<T>{new T(std::forward<Value>(value))};
-        ::new (static_cast<void*>(storage)) T* {owned.get()};
+        auto* const object = HeapObject<T>::create(std::forward<Value>(value));
+        ::new (static_cast<void*>(storage)) T* {object};
         destroy = &destroyObject<T>;
-        return *owned.release();
+        return *object;
     }
 
     template <class T> T* pointer(std::true_type) noexcept {

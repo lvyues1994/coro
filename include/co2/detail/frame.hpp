@@ -12,6 +12,7 @@
 #include "co2/coroutine_handle.hpp"
 #include "co2/detail/await_slot.hpp"
 #include "co2/detail/awaitable.hpp"
+#include "co2/detail/over_aligned.hpp"
 
 // 帧的恢复/收尾路径把状态机（Body::operator()）内联进来后，MSVC 会把 co_return 之后的
 // 收尾判成不可达并报到本文件的行号上；C4702 以函数开括号处的状态为准，见 config.hpp。
@@ -238,6 +239,91 @@ template <class Promise> struct HasAllocationFailureObject {
     static constexpr bool value = decltype(probe<Promise>(0))::value;
 };
 
+// 帧的原始内存：来源是 promise 的 operator new（若有）或 allocator。
+//
+// 帧的对齐不超过 alignof(std::max_align_t) 时按帧类型分配一个对象。超对齐的帧（局部或
+// 参数里有 alignas 更大的成员）不能指望这两个来源给出足够的对齐，于是按字节多要一些并
+// 在块内手工对齐（over_aligned.hpp），释放时归还整块。只在成员函数里实例化——那时
+// Frame 已经是完整类型。
+template <class Frame, class Promise, class FrameAllocator> struct FrameMemory {
+    using Traits = std::allocator_traits<FrameAllocator>;
+    using ByteAllocator = typename Traits::template rebind_alloc<unsigned char>;
+    using ByteTraits = std::allocator_traits<ByteAllocator>;
+    using FromPromise =
+        std::integral_constant<bool, HasPromiseOperatorNew<Promise>::value>;
+    using OverAligned = IsOverAligned<Frame>;
+
+    // 返回未构造的帧存储。promise 的 operator new 返回空时返回空。
+    static Frame* allocate(FrameAllocator& allocator) {
+        return place(allocateBlock(allocator, FromPromise{}), OverAligned{});
+    }
+
+    static void deallocate(Frame* const frame, FrameAllocator& allocator) noexcept {
+        deallocateBlock(blockOf(frame, OverAligned{}), allocator, FromPromise{});
+    }
+
+  private:
+    static constexpr std::size_t blockSize() noexcept {
+        return OverAligned::value
+                   ? overAlignedBlockSize(sizeof(Frame), alignof(Frame))
+                   : sizeof(Frame);
+    }
+
+    static void* allocateBlock(FrameAllocator&, std::true_type) {
+        return promiseAllocate<Promise>(blockSize(), 0);
+    }
+
+    static void* allocateBlock(FrameAllocator& allocator, std::false_type) {
+        return allocateFrom(allocator, OverAligned{});
+    }
+
+    static void* allocateFrom(FrameAllocator& allocator, std::false_type) {
+        return Traits::allocate(allocator, 1);
+    }
+
+    static void* allocateFrom(FrameAllocator& allocator, std::true_type) {
+        auto bytes = ByteAllocator{allocator};
+        return ByteTraits::allocate(bytes, blockSize());
+    }
+
+    static Frame* place(void* const block, std::false_type) noexcept {
+        return static_cast<Frame*>(block);
+    }
+
+    static Frame* place(void* const block, std::true_type) noexcept {
+        if (block == nullptr) return nullptr;
+        return static_cast<Frame*>(
+            placeOverAligned(block, sizeof(Frame), alignof(Frame)));
+    }
+
+    static void* blockOf(Frame* const frame, std::false_type) noexcept { return frame; }
+
+    static void* blockOf(Frame* const frame, std::true_type) noexcept {
+        return overAlignedBlockOf(frame);
+    }
+
+    static void deallocateBlock(void* const block, FrameAllocator&,
+                                std::true_type) noexcept {
+        promiseDeallocate<Promise>(block, blockSize(), Rank<2>{});
+    }
+
+    static void deallocateBlock(void* const block, FrameAllocator& allocator,
+                                std::false_type) noexcept {
+        deallocateTo(block, allocator, OverAligned{});
+    }
+
+    static void deallocateTo(void* const block, FrameAllocator& allocator,
+                             std::false_type) noexcept {
+        Traits::deallocate(allocator, static_cast<Frame*>(block), 1);
+    }
+
+    static void deallocateTo(void* const block, FrameAllocator& allocator,
+                             std::true_type) noexcept {
+        auto bytes = ByteAllocator{allocator};
+        ByteTraits::deallocate(bytes, static_cast<unsigned char*>(block), blockSize());
+    }
+};
+
 // ---- 完整的帧 ----
 
 template <class Promise, class Params, class Body, class Allocator>
@@ -245,11 +331,13 @@ struct CoroutineFrame {
     using Core = FrameCore<Promise, Params, Body>;
     using FrameAllocator = typename std::allocator_traits<
         Allocator>::template rebind_alloc<CoroutineFrame>;
-    using AllocatorTraits = std::allocator_traits<FrameAllocator>;
-    using UsesPromiseOperatorNew =
-        std::integral_constant<bool, HasPromiseOperatorNew<Promise>::value>;
+    using Memory = FrameMemory<CoroutineFrame, Promise, FrameAllocator>;
     using HasFailureObject =
         std::integral_constant<bool, HasAllocationFailureObject<Promise>::value>;
+    // allocator 以 bad_alloc 报告失败；promise 的 operator new 以返回空报告。
+    using CatchesBadAlloc = std::integral_constant<
+        bool, HasAllocationFailureObject<Promise>::value &&
+                  not HasPromiseOperatorNew<Promise>::value>;
 
     Core core;
     alignas(FrameAllocator) unsigned char allocatorStorage[sizeof(FrameAllocator)];
@@ -343,28 +431,18 @@ struct CoroutineFrame {
     }
 
     static CoroutineFrame* allocate(FrameAllocator& frameAllocator) {
-        return allocateWith(frameAllocator, UsesPromiseOperatorNew{});
+        return allocateOrNull(frameAllocator, CatchesBadAlloc{});
     }
 
-    static CoroutineFrame* allocateWith(FrameAllocator&, std::true_type) {
-        return static_cast<CoroutineFrame*>(
-            promiseAllocate<Promise>(sizeof(CoroutineFrame), 0));
+    static CoroutineFrame* allocateOrNull(FrameAllocator& frameAllocator,
+                                          std::false_type) {
+        return Memory::allocate(frameAllocator);
     }
 
-    static CoroutineFrame* allocateWith(FrameAllocator& frameAllocator,
-                                        std::false_type) {
-        return allocateFromAllocator(frameAllocator, HasFailureObject{});
-    }
-
-    static CoroutineFrame* allocateFromAllocator(FrameAllocator& frameAllocator,
-                                                 std::false_type) {
-        return AllocatorTraits::allocate(frameAllocator, 1);
-    }
-
-    static CoroutineFrame* allocateFromAllocator(FrameAllocator& frameAllocator,
-                                                 std::true_type) {
+    static CoroutineFrame* allocateOrNull(FrameAllocator& frameAllocator,
+                                          std::true_type) {
         try {
-            return AllocatorTraits::allocate(frameAllocator, 1);
+            return Memory::allocate(frameAllocator);
         } catch (std::bad_alloc const&) {
             return nullptr;
         }
@@ -376,18 +454,7 @@ struct CoroutineFrame {
         auto allocatorCopy = FrameAllocator{std::move(stored)};
         stored.~FrameAllocator();
         frame->~CoroutineFrame();
-        deallocateWith(frame, allocatorCopy, UsesPromiseOperatorNew{});
-    }
-
-    static void deallocateWith(CoroutineFrame* const frame, FrameAllocator&,
-                               std::true_type) noexcept {
-        promiseDeallocate<Promise>(frame, sizeof(CoroutineFrame), Rank<2>{});
-    }
-
-    static void deallocateWith(CoroutineFrame* const frame,
-                               FrameAllocator& allocatorCopy,
-                               std::false_type) noexcept {
-        AllocatorTraits::deallocate(allocatorCopy, frame, 1);
+        Memory::deallocate(frame, allocatorCopy);
     }
 };
 

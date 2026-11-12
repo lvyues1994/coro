@@ -54,6 +54,11 @@ Allocator
 与标准一致。局部在离开协程体作用域时（`co_return`、掉出末尾、异常逃出）就销毁，早于
 `final_suspend`。
 
+帧内存来自 promise 的 `operator new`（若有）或 allocator。局部或参数的对齐要求超过
+`alignof(std::max_align_t)` 时，这两个来源在 C++14 下都给不出保证（拿不到对齐参数），
+帧改为按字节多分配一些并在块内手工对齐（`detail/over_aligned.hpp`）；超对齐的 awaiter
+在堆回落路径上同样处理。普通帧不受影响，仍是按帧类型分配一个对象。
+
 ### 句柄
 
 `co2::coroutine_handle<P>` 是非拥有的：只保存 `FrameHeader*`。`resume()` 通过帧头里的

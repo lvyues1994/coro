@@ -1,10 +1,12 @@
 // 帧内存储构件：ResultStorage<T>、AwaitSlot（内联 + 堆回落）与 MoveOnlyFunction。
 
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "co2/config.hpp"
 #include "co2/detail/await_slot.hpp"
@@ -108,6 +110,46 @@ void awaitSlotFallsBackToTheHeapForLargeAwaiters() {
     CHECK(destroyed == 1);
 }
 
+struct alignas(64) OverAlignedAwaiter {
+    explicit OverAlignedAwaiter(int& destroyed_) noexcept : destroyed{&destroyed_} {}
+    OverAlignedAwaiter(OverAlignedAwaiter&& other) noexcept
+        : destroyed{other.destroyed} {
+        other.destroyed = nullptr;
+    }
+    ~OverAlignedAwaiter() {
+        if (destroyed != nullptr) ++*destroyed;
+    }
+
+    int* destroyed;
+};
+
+// 对齐要求超过 alignof(std::max_align_t) 的 awaiter 放不进内联缓冲，回落到堆；C++14 的
+// new 表达式不保证超对齐，槽必须自己对齐。
+void awaitSlotAlignsOverAlignedAwaitersOnTheHeap() {
+    static_assert(not co2::detail::AwaitSlot<>::isInline<OverAlignedAwaiter>(),
+                  "over-aligned awaiters never stay inline");
+
+    constexpr int count = 16;
+    auto destroyed = 0;
+    {
+        // 同时保留多个槽：单个分配碰巧对齐说明不了问题。
+        auto slots = std::vector<std::unique_ptr<co2::detail::AwaitSlot<>>>{};
+        for (auto index = 0; index != count; ++index) {
+            slots.emplace_back(new co2::detail::AwaitSlot<>{});
+            auto& stored =
+                slots.back()->emplace<OverAlignedAwaiter>(OverAlignedAwaiter{destroyed});
+            CHECK(reinterpret_cast<std::uintptr_t>(&stored) %
+                      alignof(OverAlignedAwaiter) ==
+                  0U);
+            CHECK(&slots.back()->get<OverAlignedAwaiter>() == &stored);
+        }
+        CHECK(destroyed == 0);
+        slots.front()->reset();
+        CHECK(destroyed == 1);
+    }
+    CHECK(destroyed == count);
+}
+
 // ---------------------------------------------------------------------------
 // MoveOnlyFunction
 
@@ -206,6 +248,7 @@ void moveOnlyFunctionAcceptsMoveOnlyCallables() {
 int main() {
     resultStorageOwnsExactlyOneValue();
     awaitSlotFallsBackToTheHeapForLargeAwaiters();
+    awaitSlotAlignsOverAlignedAwaitersOnTheHeap();
     moveOnlyFunctionLayoutAndInlineBoundary();
     moveOnlyFunctionOwnsItsCallableInBothStorages();
     moveOnlyFunctionAcceptsMoveOnlyCallables();

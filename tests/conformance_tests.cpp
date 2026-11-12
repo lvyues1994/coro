@@ -2,6 +2,7 @@
 // 的每条规则对应一个用例。
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -604,6 +605,8 @@ void handleRoundTripsThroughPromiseAndAddress() {
 struct AllocationStats {
     int allocations{};
     int deallocations{};
+    std::size_t allocatedBytes{};
+    std::size_t deallocatedBytes{};
     bool failNext{};
 };
 
@@ -621,10 +624,12 @@ struct CustomAllocTask {
                 return nullptr;
             }
             ++allocationStats().allocations;
+            allocationStats().allocatedBytes += size;
             return ::operator new(size);
         }
-        static void operator delete(void* const pointer, std::size_t) {
+        static void operator delete(void* const pointer, std::size_t const size) {
             ++allocationStats().deallocations;
+            allocationStats().deallocatedBytes += size;
             ::operator delete(pointer);
         }
         static CustomAllocTask get_return_object_on_allocation_failure() {
@@ -685,10 +690,12 @@ template <class Value> struct CountingAllocator {
         : stats{other.stats} {}
     Value* allocate(std::size_t const count) {
         ++stats->allocations;
+        stats->allocatedBytes += count * sizeof(Value);
         return std::allocator<Value>{}.allocate(count);
     }
     void deallocate(Value* const pointer, std::size_t const count) noexcept {
         ++stats->deallocations;
+        stats->deallocatedBytes += count * sizeof(Value);
         std::allocator<Value>{}.deallocate(pointer, count);
     }
     template <class U> struct rebind { using other = CountingAllocator<U>; };
@@ -711,6 +718,94 @@ void explicitAllocatorIsUsedForTheFrame() {
         CHECK(task.done());
     }
     CHECK(stats.deallocations == 1);
+}
+
+// ---------------------------------------------------------------------------
+// 超对齐的帧：局部的对齐要求超过 alignof(std::max_align_t) 时，C++14 的 operator new、
+// std::allocator 与 promise 的 operator new(size) 都拿不到对齐参数。帧在三条分配路径上
+// 都必须手工对齐，释放时归还的字节数与分配时一致。
+
+struct alignas(64) Wide {
+    unsigned char bytes[64];
+};
+
+bool isAlignedFor(void const* const pointer, std::size_t const alignment) {
+    return reinterpret_cast<std::uintptr_t>(pointer) % alignment == 0U;
+}
+
+auto wideLocal(EventLog& log, bool lazy, void const*& address)
+    CO2_BEG(T::VoidTask, (log, lazy, address), Wide wide;) {
+    address = &wide;
+    CO2_RETURN();
+}
+CO2_END
+
+template <class Allocator>
+auto wideLocalWithAllocator(Allocator allocator, EventLog& log, bool lazy,
+                            void const*& address)
+    CO2_BEG_WITH_ALLOCATOR(T::VoidTask, allocator, (log, lazy, address), Wide wide;) {
+    address = &wide;
+    CO2_RETURN();
+}
+CO2_END
+
+auto wideLocalWithPromiseNew(void const*& address)
+    CO2_BEG(CustomAllocTask, (address), Wide wide;) {
+    address = &wide;
+    CO2_RETURN();
+}
+CO2_END
+
+void overAlignedFramesAreAlignedOnEveryAllocationPath() {
+    // 同时保留多个帧：单个分配碰巧对齐说明不了问题。
+    constexpr std::size_t count = 16U;
+    {
+        EventLog log;
+        std::vector<void const*> addresses(count);
+        std::vector<T::VoidTask> tasks;
+        for (auto index = std::size_t{}; index != count; ++index)
+            tasks.push_back(wideLocal(log, true, addresses[index]));
+        for (auto index = std::size_t{}; index != count; ++index) {
+            tasks[index].resume();
+            CHECK(tasks[index].done());
+            CHECK(isAlignedFor(addresses[index], alignof(Wide)));
+        }
+    }
+    {
+        AllocationStats stats;
+        {
+            EventLog log;
+            std::vector<void const*> addresses(count);
+            std::vector<T::VoidTask> tasks;
+            for (auto index = std::size_t{}; index != count; ++index)
+                tasks.push_back(wideLocalWithAllocator(
+                    CountingAllocator<unsigned char>{stats}, log, true,
+                    addresses[index]));
+            for (auto index = std::size_t{}; index != count; ++index) {
+                tasks[index].resume();
+                CHECK(isAlignedFor(addresses[index], alignof(Wide)));
+            }
+            CHECK(stats.allocations == static_cast<int>(count));
+        }
+        CHECK(stats.deallocations == static_cast<int>(count));
+        CHECK(stats.allocatedBytes == stats.deallocatedBytes);
+    }
+    {
+        allocationStats() = AllocationStats{};
+        {
+            std::vector<void const*> addresses(count);
+            std::vector<CustomAllocTask> tasks;
+            for (auto index = std::size_t{}; index != count; ++index)
+                tasks.push_back(wideLocalWithPromiseNew(addresses[index]));
+            for (auto index = std::size_t{}; index != count; ++index) {
+                tasks[index].handle.resume();
+                CHECK(isAlignedFor(addresses[index], alignof(Wide)));
+            }
+            CHECK(allocationStats().allocations == static_cast<int>(count));
+        }
+        CHECK(allocationStats().deallocations == static_cast<int>(count));
+        CHECK(allocationStats().allocatedBytes == allocationStats().deallocatedBytes);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -765,5 +860,6 @@ int main() {
     handleRoundTripsThroughPromiseAndAddress();
     promiseOperatorNewAndAllocationFailureAreHonored();
     explicitAllocatorIsUsedForTheFrame();
+    overAlignedFramesAreAlignedOnEveryAllocationPath();
     localsAndReferenceParametersSurviveSuspension();
 }
