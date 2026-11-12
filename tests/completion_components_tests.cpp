@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "co2/as_result.hpp"
+#include "co2/async_generator.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/env.hpp"
 #include "co2/just.hpp"
@@ -37,7 +38,10 @@ void fail(char const* expression, int line) {
     } while (false)
 
 using sample::chain;
+using sample::Ends;
+using sample::ExpectedError;
 using sample::Leaf;
+using sample::stopped;
 
 // ---------------------------------------------------------------------------
 // 等待 JoinHandle：被 spawn 的 Task 出错或已停止，等待它的协程以同样的结果结束
@@ -235,6 +239,88 @@ void whenAllOfAVectorFollowsTheSameRules() {
     CHECK(failure.error().code() == sample::Errc::gone);
 }
 
+// ---------------------------------------------------------------------------
+// AsyncGenerator：生产者出错或已停止即流结束，正在等待的那次 next() 以同样的结果完成
+
+// 产生一个元素，然后按 leaf 结束。
+auto producesOneThen(Leaf leaf) CO2_BEG(co2::AsyncGenerator<int>, (leaf)) {
+    CO2_YIELD(1);
+    if (leaf == Leaf::fails) CO2_YIELD(co2::with_error(sample::Errc::gone));
+    if (leaf == Leaf::stops) CO2_AWAIT(Ends{stopped()});
+    if (leaf == Leaf::throws) throw ExpectedError{};
+}
+CO2_END
+
+auto drains(Leaf leaf, int& seen, bool& reachedTheEnd)
+    CO2_BEG(co2::Task<int>, (leaf, seen, reachedTheEnd),
+            co2::AsyncGenerator<int> stream; bool has{};) {
+    stream = producesOneThen(leaf);
+    for (;;) {
+        CO2_AWAIT_SET(has, stream.next());
+        if (not has) break;
+        seen += stream.value();
+    }
+    reachedTheEnd = true;
+    CO2_RETURN(seen);
+}
+CO2_END
+
+void aFailingProducerEndsItsConsumerTheSameWay() {
+    auto seen = 0;
+    auto reachedTheEnd = false;
+    CHECK(co2::syncWait(drains(Leaf::returns, seen, reachedTheEnd)) == 1);
+    CHECK(reachedTheEnd);
+
+    seen = 0;
+    reachedTheEnd = false;
+    auto const failure =
+        co2::syncWait(co2::asResult(drains(Leaf::fails, seen, reachedTheEnd)));
+    CHECK(failure->hasError());
+    CHECK(failure->error().exception() == nullptr); // 按值传过来的错误码
+    CHECK(failure->error().code() == sample::Errc::gone);
+    CHECK(seen == 1); // 出错之前的元素照常交付
+    CHECK(not reachedTheEnd);
+
+    seen = 0;
+    CHECK(co2::syncWait(co2::asResult(drains(Leaf::stops, seen, reachedTheEnd)))
+              ->isStopped());
+    CHECK(seen == 1);
+    CHECK(not reachedTheEnd);
+
+    auto const thrown =
+        co2::syncWait(co2::asResult(drains(Leaf::throws, seen, reachedTheEnd)));
+    CHECK(thrown->hasError());
+    CHECK(thrown->error().exception() != nullptr);
+}
+
+// 返回 0：第二次 next() 有值；1：出错；2：已停止。
+auto looksPastTheFailure(Leaf leaf, bool& hasAfterwards)
+    CO2_BEG(co2::Task<int>, (leaf, hasAfterwards), co2::AsyncGenerator<int> stream;
+            co2::optional<co2::Result<bool>> second; bool has{};) {
+    stream = producesOneThen(leaf);
+    CO2_AWAIT_SET(has, stream.next());
+    CO2_AWAIT_SET(second, co2::asResult(stream.next())); // 生产者在这一步里结束
+    CO2_AWAIT_SET(has, stream.next());                   // 流已经结束
+    hasAfterwards = has;
+    CO2_RETURN(second->isStopped() ? 2 : second->hasError() ? 1 : 0);
+}
+CO2_END
+
+// 那次失败只交付一次：之后的 next() 只报告流已结束。
+void theFailureIsDeliveredOnceAndThenTheStreamIsOver() {
+    auto hasAfterwards = true;
+    CHECK(co2::syncWait(looksPastTheFailure(Leaf::fails, hasAfterwards)) == 1);
+    CHECK(not hasAfterwards);
+
+    hasAfterwards = true;
+    CHECK(co2::syncWait(looksPastTheFailure(Leaf::stops, hasAfterwards)) == 2);
+    CHECK(not hasAfterwards);
+
+    hasAfterwards = true;
+    CHECK(co2::syncWait(looksPastTheFailure(Leaf::returns, hasAfterwards)) == 0);
+    CHECK(not hasAfterwards);
+}
+
 } // namespace
 
 int main() {
@@ -246,5 +332,7 @@ int main() {
     whenAllPrefersAnErrorOverStopped();
     whenAllRequestsStopFromTheOthersWhenAChildStops();
     whenAllOfAVectorFollowsTheSameRules();
+    aFailingProducerEndsItsConsumerTheSameWay();
+    theFailureIsDeliveredOnceAndThenTheStreamIsOver();
     return 0;
 }

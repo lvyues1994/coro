@@ -4,10 +4,14 @@
 #include <type_traits>
 #include <utility>
 
+#include "co2/completion.hpp"
 #include "co2/contract.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/detail/result_storage.hpp"
+#include "co2/detail/uninitialized.hpp"
 #include "co2/env.hpp"
+#include "co2/error.hpp"
+#include "co2/just.hpp"
 #include "co2/stop_token.hpp"
 
 // co2：异步生成器。生产者体内可以 CO2_AWAIT，也可以 CO2_YIELD；消费者：
@@ -21,6 +25,10 @@
 // 环境：生产者属于消费者的等待链。每次 next() 把消费者的 stop_token 交给生产者的
 // promise，生产者体内 CO2_AWAIT_SET(token, co2::getStopToken()) 读到它，生产者等待的子
 // Task 也从这里继承——与 Task 等待子 Task 的传播方式相同。
+//
+// 三种完成方式：生产者出错或已停止即流结束，正在等待的那次 next() 以同样的结果完成
+// ——等待它的消费者默认也就此结束，想自己处理就写 asResult(stream.next())。那次失败只
+// 交付一次，之后的 next() 得到 false。生产者体内可以 CO2_YIELD(co2::with_error(e))。
 //
 // 销毁契约：有 next() 未完成时（生产者正在运行或挂起在某个操作上）不能销毁；停在
 // yield 点或从未启动时可以随时销毁。
@@ -40,6 +48,10 @@ template <class T> struct AsyncGeneratorPromise {
     // 声明构造函数是为了让它不是聚合类型：C++20 起聚合可以用圆括号初始化，协程的第一个
     // 参数若是句柄，就会被拿去初始化 consumer——生成器一开始就像有一个未完成的 next()。
     AsyncGeneratorPromise() = default;
+
+    ~AsyncGeneratorPromise() {
+        if (ending == Ending::error) failure.destroy();
+    }
 
     AsyncGenerator<T> get_return_object() noexcept;
 
@@ -81,9 +93,30 @@ template <class T> struct AsyncGeneratorPromise {
         return {};
     }
 
+    // CO2_YIELD(co2::with_error(e))：生产者以错误 e 结束。
+    JustError yield_value(WithError failed) noexcept {
+        return JustError{std::move(failed.error)};
+    }
+
     void return_void() noexcept {}
 
-    void unhandled_exception() noexcept { error = std::current_exception(); }
+    // 异常只在这里被捕获一次，之后是一个按值传的 Error。
+    void unhandled_exception() noexcept { fail(Error{std::current_exception()}); }
+
+    // 生产者等待的操作出错 / 已停止（或者它自己 with_error / just_error）：流到此为止。
+    void return_error(Error error) noexcept { fail(std::move(error)); }
+    void return_stopped() noexcept { ending = Ending::stopped; }
+
+    // 生产者是怎么结束的，由正在等待的那次 next() 取走，只交付一次：之后流只是"结束了"。
+    Completion takeEnding() noexcept {
+        auto const how = ending;
+        ending = Ending::none;
+        if (how == Ending::none) return Completion::value();
+        if (how == Ending::stopped) return Completion::stopped();
+        auto completion = Completion::error(std::move(failure.get()));
+        failure.destroy();
+        return completion;
+    }
 
     // ---- 环境 ----
 
@@ -110,13 +143,23 @@ template <class T> struct AsyncGeneratorPromise {
         return pending;
     }
 
+    // 生产者以什么方式失败了、消费者还没取走。none：没有失败，或者已经取走。
+    enum class Ending : unsigned char { none, error, stopped };
+
     coroutine_handle<> consumer;
     ResultStorage<T> stored;
-    std::exception_ptr error;
+    Uninitialized<Error> failure; // ending 为 error 时有效
     // 每次 next() 重新取自那一次的消费者；消费者在这一步里一直挂着，借用即可。两次
     // next() 之间它可能已经失效，但那时生产者不在运行，没有人读它。
     EnvStopToken stopToken;
     bool finished{};
+    Ending ending{Ending::none};
+
+  private:
+    void fail(Error error) noexcept {
+        failure.construct(std::move(error));
+        ending = Ending::error;
+    }
 };
 
 } // namespace detail
@@ -145,14 +188,19 @@ template <class T> struct AsyncGenerator {
             return owner->handle;
         }
 
+        // 不认识 await_completion() 的调用方直接走到这里：生产者的错误在这里抛出（同样
+        // 只抛一次）；已停止没有值可给，是契约违规。
         bool await_resume() {
             auto& promise = owner->handle.promise();
-            if (promise.error) {
-                auto pending = std::exception_ptr{};
-                std::swap(pending, promise.error);
-                std::rethrow_exception(pending);
-            }
+            using Ending = typename promise_type::Ending;
+            if (promise.ending == Ending::error) promise.takeEnding().error().raise();
+            CO2_CONTRACT_CHECK(promise.ending != Ending::stopped);
             return not promise.finished;
+        }
+
+        // 生产者出错或已停止：这一次 next() 以同样的结果完成。
+        Completion await_completion() noexcept {
+            return owner->handle.promise().takeEnding();
         }
     };
 
