@@ -191,6 +191,48 @@ void explicitValueTypeCopiesOnlyWhenTheConsumerAsks() {
         "explicit value type");
 }
 
+// Generator<T const&> yield const 右值：能绑定 const 右值的只有"记地址"的重载，而宏展开
+// 里的临时对象活不过挂起点（设计稿 D10），所以它必须像非 const 右值一样在帧里存一份。
+
+struct Copyable {
+    Copyable(Counters& counters_, int const value_) noexcept
+        : counters{&counters_}, value{value_} {
+        ++counters->constructed;
+    }
+    Copyable(Copyable const& other) noexcept
+        : counters{other.counters}, value{other.value} {
+        ++counters->constructed;
+    }
+    Copyable& operator=(Copyable const&) = delete;
+    ~Copyable() { ++counters->destroyed; }
+    Counters* counters;
+    int value;
+};
+
+Copyable const makeConstCopyable(Counters& counters, int const value) {
+    return Copyable{counters, value};
+}
+
+auto constRvalues(Counters& counters)
+    CO2_BEG(co2::Generator<Copyable const&>, (counters), int i{};) {
+    for (i = 0; i < 3; ++i)
+        CO2_YIELD(makeConstCopyable(counters, i));
+}
+CO2_END
+
+void constRvaluesYieldedByConstReferenceAreKeptAlive() {
+    Counters counters;
+    auto seen = 0;
+    for (auto const& item : constRvalues(counters)) {
+        // 消费者拿到引用时，被引用的对象必须还活着。
+        CHECK(counters.alive() == 1);
+        CHECK(item.value == seen);
+        ++seen;
+    }
+    CHECK(seen == 3);
+    CHECK(counters.alive() == 0);
+}
+
 // ---------------------------------------------------------------------------
 // AsyncGenerator：生产者在线程池上 yield，消费者在生产者所在线程恢复。
 
@@ -368,6 +410,7 @@ int main() {
     generatorThrowingBeforeTheFirstYieldThrowsFromBegin();
     nestedGeneratorThrowingBeforeItsFirstYieldPropagates();
     explicitValueTypeCopiesOnlyWhenTheConsumerAsks();
+    constRvaluesYieldedByConstReferenceAreKeptAlive();
     asyncGeneratorConsumerFollowsTheProducerAcrossThreads();
     tokensAndCallbacksOutliveTheirSource();
     requestAfterEveryTokenIsGoneIsStillWellDefined();

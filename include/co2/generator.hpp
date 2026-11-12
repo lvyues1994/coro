@@ -14,7 +14,7 @@
 // co2：与 std::generator<Ref, V> 同形的同步生成器。
 //
 //   Generator<int>          yield 值：prvalue 被移进帧，左值被复制（std 的 copy 路径）
-//   Generator<T const&>     yield 左值：只记地址，不复制
+//   Generator<T const&>     yield 左值：只记地址，不复制；yield 右值：存进帧（const 右值复制）
 //   Generator<T, V>         显式 value_type
 //
 // 嵌套：CO2_YIELD(co2::elements_of(inner())) 把 inner 的元素直接交给根的消费者。所有
@@ -130,6 +130,17 @@ template <class Ref, class V> struct GeneratorPromise {
                   std::is_constructible<Stored, Stored const&>::value>::type>
     StoredYieldAwaiter yield_value(Stored const& value) {
         return store(value);
+    }
+
+    // yielded 是 `T const&` 时，const 右值绑不上上面的 `Stored&&`，只能落到"记地址"的重载
+    // ——而宏展开里的临时对象活不过挂起点（D10）。const 右值因此单独一个重载，存一份副本。
+    template <class U = yielded,
+              class = typename std::enable_if<
+                  std::is_lvalue_reference<U>::value &&
+                  std::is_const<typename std::remove_reference<U>::type>::value &&
+                  std::is_constructible<Stored, Stored const&>::value>::type>
+    StoredYieldAwaiter yield_value(Stored const&& value) {
+        return store(static_cast<Stored const&>(value));
     }
 
     // ---- yield elements_of(...)：嵌套生成器或任意范围 ----
