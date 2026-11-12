@@ -317,6 +317,7 @@ i7-13700KF，每项 7 轮取中位数：
 | elements_of 深度 8 yield/next | 1.9 |
 | symmetric Task transfer（含帧分配） | 11.9 |
 | syncWait ready Task | 25.4 |
+| Task 链上的失败，100 层，每层 | 558 |
 | Task 等待子 Task，8 线程各自的 stop_token | 19.3 |
 | Task 等待子 Task，8 线程共享一个 stop_token | 18.2 |
 | ManualExecutor hop | 20.1 |

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -145,6 +146,30 @@ double syncWaitReadyTask() {
     });
 }
 
+// 失败沿等待链向上传：叶子失败，根上接住。报告的是每经过一层的成本。
+auto failsAtDepth(int depth) CO2_BEG(co2::Task<int>, (depth), int v{};) {
+    if (depth == 0) throw std::runtime_error{"leaf"};
+    CO2_AWAIT_SET(v, failsAtDepth(depth - 1));
+    CO2_RETURN(v + 1);
+}
+CO2_END
+
+double taskFailureThroughChain() {
+    constexpr int depth = 100;
+    constexpr int rounds = 5000;
+    return nanosecondsPerOp(static_cast<std::size_t>(depth) * rounds, [&] {
+        long caught = 0;
+        for (auto round = 0; round != rounds; ++round) {
+            try {
+                co2::syncWait(failsAtDepth(depth));
+            } catch (std::runtime_error const&) {
+                ++caught;
+            }
+        }
+        sink = caught;
+    });
+}
+
 // 多个线程各自跑一条"等待子 Task"的循环。sharedToken 为真时所有线程的 Task 树共用同一个
 // stop_token——whenAll / spawn 的各个分支落在不同线程上时就是这种形态。
 double awaitChildOnThreads(int const threads, bool const sharedToken) {
@@ -230,6 +255,7 @@ Benchmark const benchmarks[] = {
     {"elements_of depth 8 yield/next", &elementsOfDepth8},
     {"symmetric Task transfer (with frame allocation)", &symmetricTaskTransfer},
     {"syncWait ready Task", &syncWaitReadyTask},
+    {"Task failure through a 100-deep chain, per layer", &taskFailureThroughChain},
     {"Task await child, 8 threads, own stop_token", &awaitChildOwnToken},
     {"Task await child, 8 threads, shared stop_token", &awaitChildSharedToken},
     {"ManualExecutor hop", &manualExecutorHop},
