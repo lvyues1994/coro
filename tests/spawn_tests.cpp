@@ -279,6 +279,20 @@ void spawnWithAnAlreadyStoppedParentStartsStopped() {
     CHECK(handle.join() == 0);
 }
 
+// 析构时请求停止是为了让还在跑的 Task 尽快收尾；Task 已经完成就没有可停止的东西，
+// 之前拿走的 token 也不该在事后变成"已请求"。
+void destroyingACompletedJoinHandleDoesNotRequestStop() {
+    co2::ManualExecutor executor;
+    co2::stop_token token;
+    {
+        auto handle = co2::spawn(executor, answer(1));
+        token = handle.getStopToken();
+        executor.run();
+        CHECK(handle.join() == 1);
+    }
+    CHECK(not token.stop_requested());
+}
+
 void joinHandlesAreMovable() {
     co2::ThreadPool pool{1U};
     auto first = co2::spawn(pool, answer(3));
@@ -305,6 +319,7 @@ int main() {
     descendantsOfAForeignPromiseKeepTheInheritedTokenAlive();
     spawnForwardsTheParentsStopRequest();
     spawnWithAnAlreadyStoppedParentStartsStopped();
+    destroyingACompletedJoinHandleDoesNotRequestStop();
     joinHandlesAreMovable();
     return 0;
 }

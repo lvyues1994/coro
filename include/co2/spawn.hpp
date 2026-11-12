@@ -192,8 +192,9 @@ template <class T> struct JoinHandle {
 
     void reset() noexcept {
         if (state == nullptr) return;
-        // 先在锁外请求停止：回调可能同步把 Task 推到完成（complete() 需要拿锁）。
-        state->source.request_stop();
+        // Task 还没完成才请求停止——已经完成就没有可停止的东西。请求必须在锁外：回调可能
+        // 同步把 Task 推到完成，而 complete() 需要拿这把锁。
+        if (not isReady()) state->source.request_stop();
         auto destroyNow = false;
         {
             std::lock_guard<std::mutex> lock{state->mutex};
