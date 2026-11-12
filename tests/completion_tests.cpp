@@ -10,15 +10,18 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "co2/as_result.hpp"
 #include "co2/completion.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/error.hpp"
 #include "co2/just.hpp"
 #include "co2/manual_executor.hpp"
 #include "co2/optional.hpp"
+#include "co2/result.hpp"
 #include "co2/spawn.hpp"
 #include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
@@ -644,6 +647,112 @@ void justErrorRaisesForACallerThatSkipsAwaitCompletion() {
     CHECK(sawCode);
 }
 
+// ---------------------------------------------------------------------------
+// asResult：三种结果都变成值，当前协程照常往下执行
+
+// 返回 0：值；1：错误码；2：已停止；3：捕获的异常。
+auto classifies(Leaf leaf, int& resumed)
+    CO2_BEG(co2::Task<int>, (leaf, resumed), co2::optional<co2::Result<int>> result;) {
+    CO2_AWAIT_SET(result, co2::asResult(chain(1, leaf, resumed, nullptr)));
+    if (result->isStopped()) CO2_RETURN(2);
+    if (result->hasValue()) CO2_RETURN(result->value() == 2 ? 0 : -1);
+    if (result->error().exception() != nullptr) CO2_RETURN(3);
+    CO2_RETURN(result->error().code() == sample::Errc::gone ? 1 : -1);
+}
+CO2_END
+
+void asResultTurnsEveryCompletionIntoAValue() {
+    auto resumed = 0;
+    CHECK(co2::syncWait(classifies(Leaf::returns, resumed)) == 0);
+    CHECK(co2::syncWait(classifies(Leaf::fails, resumed)) == 1);
+    CHECK(co2::syncWait(classifies(Leaf::stops, resumed)) == 2);
+    CHECK(co2::syncWait(classifies(Leaf::throws, resumed)) == 3);
+}
+
+// 标准写法的 awaiter：没有 await_completion()。
+struct Seven {
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(co2::coroutine_handle<>) const noexcept {}
+    int await_resume() const noexcept { return 7; }
+};
+
+struct Throws {
+    bool await_ready() const noexcept { return true; }
+    void await_suspend(co2::coroutine_handle<>) const noexcept {}
+    int await_resume() const { throw ExpectedError{}; }
+};
+
+auto wrapsPlainAwaiters(int& sum, bool& caught, bool& voidHasValue)
+    CO2_BEG(co2::Task<>, (sum, caught, voidHasValue),
+            co2::optional<co2::Result<int>> number;
+            co2::optional<co2::Result<void>> nothing; Seven lvalue;) {
+    CO2_AWAIT_SET(number, co2::asResult(Seven{})); // 没有 await_completion()：一定有值
+    sum += number->value();
+    CO2_AWAIT_SET(number, co2::asResult(lvalue)); // 左值：只记引用
+    sum += number->value();
+    CO2_AWAIT_SET(number, co2::asResult(Throws{})); // await_resume() 的异常被接成错误
+    caught = number->hasError() && number->error().exception() != nullptr;
+    CO2_AWAIT_SET(nothing, co2::asResult(co2::suspend_never{})); // 结果是 void
+    voidHasValue = nothing->hasValue();
+}
+CO2_END
+
+void asResultWrapsAnyAwaitable() {
+    auto sum = 0;
+    auto caught = false;
+    auto voidHasValue = false;
+    CHECK(co2::syncWait(wrapsPlainAwaiters(sum, caught, voidHasValue)).has_value());
+    CHECK(sum == 14);
+    CHECK(caught);
+    CHECK(voidHasValue);
+}
+
+auto voidLeaf(Leaf leaf) CO2_BEG(co2::Task<>, (leaf)) {
+    if (leaf == Leaf::stops) CO2_AWAIT(Ends{stopped()});
+}
+CO2_END
+
+// 根上按值拿到三种结果，一个也不抛：禁用异常的工程在根上就是这样写。
+void syncWaitOfAsResultHandsTheOutcomeToOrdinaryCode() {
+    auto resumed = 0;
+    static_assert(
+        std::is_same<decltype(co2::syncWait(
+                         co2::asResult(chain(0, Leaf::returns, resumed, nullptr)))),
+                     co2::optional<co2::Result<int>>>::value,
+        "syncWait(asResult(Task<int>)) must return optional<Result<int>>");
+    static_assert(
+        std::is_same<decltype(co2::syncWait(co2::asResult(voidLeaf(Leaf::returns)))),
+                     co2::optional<co2::Result<void>>>::value,
+        "syncWait(asResult(Task<void>)) must return optional<Result<void>>");
+
+    auto const value =
+        co2::syncWait(co2::asResult(chain(1, Leaf::returns, resumed, nullptr)));
+    CHECK(value.has_value() && value->hasValue() && value->value() == 2);
+
+    auto const failure =
+        co2::syncWait(co2::asResult(chain(1, Leaf::fails, resumed, nullptr)));
+    CHECK(failure.has_value() && failure->hasError());
+    CHECK(failure->error().code() == sample::Errc::gone);
+
+    // asResult 自己不会以已停止完成：optional 总是有值，"已停止"在 Result 里。
+    auto const stop =
+        co2::syncWait(co2::asResult(chain(1, Leaf::stops, resumed, nullptr)));
+    CHECK(stop.has_value() && stop->isStopped());
+
+    auto const thrown =
+        co2::syncWait(co2::asResult(chain(1, Leaf::throws, resumed, nullptr)));
+    CHECK(thrown.has_value() && thrown->hasError());
+    CHECK(thrown->error().exception() != nullptr);
+    CHECK(thrown->error().code() == co2::Errc::unhandled_exception);
+
+    CHECK(co2::syncWait(co2::asResult(voidLeaf(Leaf::returns)))->hasValue());
+    CHECK(co2::syncWait(co2::asResult(voidLeaf(Leaf::stops)))->isStopped());
+
+    // 不是 Task 的 awaitable 走通用重载，结果同形。
+    auto const plain = co2::syncWait(co2::asResult(Seven{}));
+    CHECK(plain.has_value() && plain->value() == 7);
+}
+
 } // namespace
 
 int main() {
@@ -669,5 +778,8 @@ int main() {
     justErrorAndWithErrorEndTheTaskWithThatError();
     justErrorWorksInAnyPromiseThatHasTheEntry();
     justErrorRaisesForACallerThatSkipsAwaitCompletion();
+    asResultTurnsEveryCompletionIntoAValue();
+    asResultWrapsAnyAwaitable();
+    syncWaitOfAsResultHandsTheOutcomeToOrdinaryCode();
     return 0;
 }

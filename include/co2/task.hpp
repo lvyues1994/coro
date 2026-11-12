@@ -337,6 +337,16 @@ struct TaskAccess {
         return takeRootResult(task, std::is_void<T>{});
     }
 
+    // 把结果整个取成值（只可一次）：三种结果都不抛。asResult(Task) 的根用它。
+    template <class T> static Result<T> takeOutcome(Task<T>& task) {
+        CO2_CONTRACT_CHECK(task.handle && task.handle.done());
+        auto& promise = task.handle.promise();
+        if (promise.state == TaskState::stopped) return Result<T>::stopped();
+        if (promise.state == TaskState::error)
+            return Result<T>{std::move(promise.storage.error)};
+        return valueAsResult(task, std::is_void<T>{});
+    }
+
     template <class T> static bool hasError(Task<T> const& task) noexcept {
         return task.handle && task.handle.promise().state == TaskState::error;
     }
@@ -362,6 +372,20 @@ struct TaskAccess {
     static RootResult<void> takeRootResult(Task<void>& task, std::true_type) {
         takeResult(task);
         return RootResult<void>{Unit{}};
+    }
+
+    // 取值时 T 的移动构造抛出：与 asResult 的其他路径一样接成错误。
+    template <class T> static Result<T> valueAsResult(Task<T>& task, std::false_type) {
+        try {
+            return Result<T>{takeResult(task)};
+        } catch (...) {
+            return Result<T>{Error{std::current_exception()}};
+        }
+    }
+
+    static Result<void> valueAsResult(Task<void>& task, std::true_type) {
+        takeResult(task);
+        return Result<void>{};
     }
 };
 

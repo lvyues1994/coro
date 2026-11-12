@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "co2/as_result.hpp"
 #include "co2/callback.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/detail/await_slot.hpp"
@@ -111,6 +112,12 @@ void taskCreationIsExactlyOneAllocationPerFrame() {
     CHECK_ALLOCATIONS(1, { auto task = leaf(1); });
     // 外层帧 + 子帧 = 2；syncWait 自身不分配（续体帧在栈上）。
     CHECK_ALLOCATIONS(2, CHECK(co2::syncWait(awaitsLeaf(2)) == 2));
+}
+
+void syncWaitOfAsResultTaskAddsNoFrame() {
+    // 只有 Task 自己的帧。syncWait(awaitable) 的通用重载会为非 Task 的 awaitable 再包
+    // 一层协程；asResult(Task) 有专门的重载，直接读 Task 的结果。
+    CHECK_ALLOCATIONS(1, CHECK(co2::syncWait(co2::asResult(leaf(2)))->value() == 2));
 }
 
 auto hops(co2::Scheduler& scheduler, int count)
@@ -393,6 +400,7 @@ int main() {
     }
     generatorIterationDoesNotAllocate();
     taskCreationIsExactlyOneAllocationPerFrame();
+    syncWaitOfAsResultTaskAddsNoFrame();
     manualExecutorHopsDoNotAllocateInSteadyState();
     threadPoolHopsDoNotAllocateInSteadyState();
     stopTokenOperationsAllocateOnlyTheState();

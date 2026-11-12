@@ -1,6 +1,7 @@
 #pragma once
 
 // co2 的全部公共头。按需包含单个头文件同样可行，每个头都能独立包含。
+#include "co2/as_result.hpp"
 #include "co2/async_generator.hpp"
 #include "co2/callback.hpp"
 #include "co2/completion.hpp"

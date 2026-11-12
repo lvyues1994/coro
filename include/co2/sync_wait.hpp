@@ -5,6 +5,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "co2/as_result.hpp"
 #include "co2/contract.hpp"
 #include "co2/coroutine.hpp"
 #include "co2/coroutine_handle.hpp"
@@ -73,6 +74,21 @@ detail::RootResult<T> syncWait(Task<T> task, stop_token token = {}) {
     detail::TaskAccess::start(task, completion.handle(), std::move(token));
     state.wait();
     return detail::TaskAccess::takeRootResult(task);
+}
+
+// asResult(Task) 的同步等待：三种结果都作为值交给调用方，不抛异常。它直接读 Task 的
+// 结果，不像下面的通用重载那样再包一层协程——禁用异常的工程里这是根上的主路径，不能
+// 每次多分配一个帧。asResult 自己不会以已停止完成，所以返回的 optional 总是有值的；
+// 保留 optional 是为了与其他根同形。
+template <class T>
+optional<Result<T>> syncWait(AsResult<Task<T>> wrapped, stop_token token = {}) {
+    auto& task = wrapped.awaitable;
+    CO2_CONTRACT_CHECK(task);
+    detail::SyncWaitState state;
+    detail::SyncWaitCompletion completion{state};
+    detail::TaskAccess::start(task, completion.handle(), std::move(token));
+    state.wait();
+    return optional<Result<T>>{detail::TaskAccess::takeOutcome(task)};
 }
 
 namespace detail {
