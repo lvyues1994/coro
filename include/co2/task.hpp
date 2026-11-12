@@ -345,6 +345,11 @@ struct TaskAccess {
         return takeRootResult(task, std::is_void<T>{});
     }
 
+    template <class T> static TaskState stateOf(Task<T> const& task) noexcept {
+        CO2_CONTRACT_CHECK(task.handle);
+        return task.handle.promise().state;
+    }
+
     // 这个 Task 是怎么结束的；错误在这里被取走。持有 Task 的 awaiter（JoinHandle、
     // whenAll）用它实现自己的 await_completion()。
     template <class T> static Completion completionOf(Task<T>& task) noexcept {
