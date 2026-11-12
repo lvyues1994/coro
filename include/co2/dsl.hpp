@@ -26,36 +26,64 @@
 #define CO2_DETAIL_CAPTURE_BIND(name)                                                  \
     , name { _co2_params.name }
 
+// 成员函数协程（CO2_BEG_MEMBER，object_parameter 为 1）多出的几处：隐式对象参数是第一个
+// 协程参数（[dcl.fct.def.coroutine]/4）。this 作为指针 `self` 存进参数副本，排在最前；
+// promise 的构造函数收到的是它指向的对象（左值 *this）；Body 里的 `self` 是这个指针的
+// 副本，类型就是成员函数里 this 的类型，const 成员函数里指向 const。object_parameter
+// 为 0 时这些宏都展开为空。
+#define CO2_DETAIL_SELF_TYPE_0
+#define CO2_DETAIL_SELF_TYPE_1 using _co2_self_type = decltype(this);
+#define CO2_DETAIL_SELF_PACK_MEMBER_0
+#define CO2_DETAIL_SELF_PACK_MEMBER_1 _co2_self_type self;
+#define CO2_DETAIL_SELF_PROMISE_ARGUMENT_0
+#define CO2_DETAIL_SELF_PROMISE_ARGUMENT_1 *this->self,
+#define CO2_DETAIL_SELF_FORWARD_0
+#define CO2_DETAIL_SELF_FORWARD_1 this,
+#define CO2_DETAIL_SELF_BODY_MEMBER_0
+#define CO2_DETAIL_SELF_BODY_MEMBER_1 _co2_self_type const self;
+#define CO2_DETAIL_SELF_BODY_BIND_0
+#define CO2_DETAIL_SELF_BODY_BIND_1                                                    \
+    , self { _co2_params.self }
+
 // 参数副本（_co2_capture_pack）与局部（_co2_body）是帧里两个独立的对象，这样销毁
 // 顺序才能与标准一致：局部 → promise → 参数副本。
 //
 // 参数副本由 _co2_make_params 直接在帧里构造：它按引用捕获函数参数，等帧分配好之后才
 // 把 by-value 参数移动进去——与标准一样恰好一次移动，中间没有栈上的副本。allocator
 // 表达式在此之前求值。
-#define CO2_DETAIL_BEG_IMPL(return_type, allocator, captures, ...)                     \
+#define CO2_DETAIL_BEG_IMPL(object_parameter, return_type, allocator, captures, ...)   \
     ->CO2_DETAIL_PP_REMOVE_PARENS(return_type) {                                       \
         using _co2_return_type = CO2_DETAIL_PP_REMOVE_PARENS(return_type);             \
         using _co2_promise_type =                                                      \
             typename ::co2::coroutine_traits<_co2_return_type>::promise_type;          \
         auto _co2_allocator = (allocator);                                             \
+        CO2_DETAIL_PP_CAT(CO2_DETAIL_SELF_TYPE_, object_parameter)                     \
         CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_TYPE, captures)                \
         struct _co2_capture_pack {                                                     \
+            CO2_DETAIL_PP_CAT(CO2_DETAIL_SELF_PACK_MEMBER_, object_parameter)          \
             CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_MEMBER, captures)          \
             void _co2_construct_promise(void* const _co2_at) {                         \
                 ::co2::detail::constructPromise<_co2_promise_type>(                    \
-                    _co2_at, CO2_DETAIL_PP_TUPLE_FOR_EACH(                             \
-                                 CO2_DETAIL_CAPTURE_LVALUE,                            \
-                                 captures)::co2::detail::NoMoreParams{});              \
+                    _co2_at,                                                           \
+                    CO2_DETAIL_PP_CAT(CO2_DETAIL_SELF_PROMISE_ARGUMENT_,               \
+                                      object_parameter)                                \
+                        CO2_DETAIL_PP_TUPLE_FOR_EACH(                                  \
+                            CO2_DETAIL_CAPTURE_LVALUE,                                 \
+                            captures)::co2::detail::NoMoreParams{});                   \
             }                                                                          \
         };                                                                             \
         auto const _co2_make_params = [&](void* const _co2_at) {                       \
             ::new (_co2_at) _co2_capture_pack{                                         \
-                CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_FORWARD, captures)};   \
+                CO2_DETAIL_PP_CAT(CO2_DETAIL_SELF_FORWARD_, object_parameter)          \
+                    CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_FORWARD,           \
+                                                 captures)};                           \
         };                                                                             \
         struct _co2_body final : ::co2::detail::BodyBase {                             \
+            CO2_DETAIL_PP_CAT(CO2_DETAIL_SELF_BODY_MEMBER_, object_parameter)          \
             CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_REF, captures)             \
             explicit _co2_body(_co2_capture_pack& _co2_params)                         \
                 : ::co2::detail::BodyBase {}                                           \
+            CO2_DETAIL_PP_CAT(CO2_DETAIL_SELF_BODY_BIND_, object_parameter)            \
             CO2_DETAIL_PP_TUPLE_FOR_EACH(CO2_DETAIL_CAPTURE_BIND, captures) {          \
                 static_cast<void>(_co2_params);                                        \
             }                                                                          \
@@ -87,10 +115,11 @@
         }
 
 #define CO2_DETAIL_BEG_WITH_LOCALS(return_type, captures, ...)                         \
-    CO2_DETAIL_BEG_IMPL(return_type, ::co2::detail::DefaultFrameAllocator{}, captures, \
-                        __VA_ARGS__)
+    CO2_DETAIL_BEG_IMPL(0, return_type, ::co2::detail::DefaultFrameAllocator{},        \
+                        captures, __VA_ARGS__)
 #define CO2_DETAIL_BEG_WITHOUT_LOCALS(return_type, captures)                           \
-    CO2_DETAIL_BEG_IMPL(return_type, ::co2::detail::DefaultFrameAllocator{}, captures, )
+    CO2_DETAIL_BEG_IMPL(0, return_type, ::co2::detail::DefaultFrameAllocator{},        \
+                        captures, )
 // 两个实参（返回类型、捕获列表）走 WITHOUT_LOCALS，三个及以上走 WITH_LOCALS。局部列表
 // 里的每个顶层逗号都会多出一个宏实参；总数上限 64，见 preprocessor.hpp。
 #define CO2_BEG(...)                                                                   \
@@ -104,15 +133,56 @@
 // 用调用方提供的 allocator 分配协程帧（std::allocator_arg 约定的宏形式）。allocator
 // 表达式在捕获被转发之前求值。
 #define CO2_DETAIL_BEG_ALLOC_WITH_LOCALS(return_type, allocator, captures, ...)        \
-    CO2_DETAIL_BEG_IMPL(return_type, allocator, captures, __VA_ARGS__)
+    CO2_DETAIL_BEG_IMPL(0, return_type, allocator, captures, __VA_ARGS__)
 #define CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS(return_type, allocator, captures)          \
-    CO2_DETAIL_BEG_IMPL(return_type, allocator, captures, )
+    CO2_DETAIL_BEG_IMPL(0, return_type, allocator, captures, )
 // 三个实参（返回类型、allocator、捕获列表）走 WITHOUT_LOCALS，四个及以上走 WITH_LOCALS。
 #define CO2_BEG_WITH_ALLOCATOR(...)                                                    \
     CO2_DETAIL_PP_ARG_65(                                                              \
         __VA_ARGS__, CO2_DETAIL_PP_REPEAT_60(CO2_DETAIL_BEG_ALLOC_WITH_LOCALS),        \
         CO2_DETAIL_BEG_ALLOC_WITH_LOCALS, CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS,         \
         CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS, CO2_DETAIL_BEG_ALLOC_WITHOUT_LOCALS, ~)   \
+    (__VA_ARGS__)
+
+// 非静态成员函数的协程体：
+//
+//   auto Reader::read(int n) CO2_BEG_MEMBER(Task<int>, (n), int got{};) {
+//       CO2_AWAIT_SET(got, self->source.next(n));
+//       CO2_RETURN(got + self->offset);
+//   }
+//   CO2_END
+//
+// 与 CO2_BEG 的差别只有隐式对象参数：promise 的构造函数先收到 *this（左值）再是参数
+// 副本，与标准一致；体内用 `self` 代替 `this`——协程体是局部类的成员函数，访问不到外层
+// 的 this 和成员名，所以成员一律写成 self->member（私有成员同样可以访问）。self 是裸
+// 指针：对象必须活到协程结束，和语言级协程捕获 this 的规则相同。
+//
+// override / final 跟在尾置返回类型之后，宏插不进去：带这些说明符的虚函数在类内声明、
+// 在类外用 CO2_BEG_MEMBER 定义。用在静态成员函数或普通函数里是编译错误（没有 this）。
+#define CO2_DETAIL_BEG_MEMBER_WITH_LOCALS(return_type, captures, ...)                  \
+    CO2_DETAIL_BEG_IMPL(1, return_type, ::co2::detail::DefaultFrameAllocator{},        \
+                        captures, __VA_ARGS__)
+#define CO2_DETAIL_BEG_MEMBER_WITHOUT_LOCALS(return_type, captures)                    \
+    CO2_DETAIL_BEG_IMPL(1, return_type, ::co2::detail::DefaultFrameAllocator{},        \
+                        captures, )
+#define CO2_BEG_MEMBER(...)                                                            \
+    CO2_DETAIL_PP_ARG_65(                                                              \
+        __VA_ARGS__, CO2_DETAIL_PP_REPEAT_60(CO2_DETAIL_BEG_MEMBER_WITH_LOCALS),       \
+        CO2_DETAIL_BEG_MEMBER_WITH_LOCALS, CO2_DETAIL_BEG_MEMBER_WITH_LOCALS,          \
+        CO2_DETAIL_BEG_MEMBER_WITHOUT_LOCALS, CO2_DETAIL_BEG_MEMBER_WITHOUT_LOCALS, ~) \
+    (__VA_ARGS__)
+
+#define CO2_DETAIL_BEG_MEMBER_ALLOC_WITH_LOCALS(return_type, allocator, captures, ...) \
+    CO2_DETAIL_BEG_IMPL(1, return_type, allocator, captures, __VA_ARGS__)
+#define CO2_DETAIL_BEG_MEMBER_ALLOC_WITHOUT_LOCALS(return_type, allocator, captures)   \
+    CO2_DETAIL_BEG_IMPL(1, return_type, allocator, captures, )
+#define CO2_BEG_MEMBER_WITH_ALLOCATOR(...)                                             \
+    CO2_DETAIL_PP_ARG_65(                                                              \
+        __VA_ARGS__, CO2_DETAIL_PP_REPEAT_60(CO2_DETAIL_BEG_MEMBER_ALLOC_WITH_LOCALS), \
+        CO2_DETAIL_BEG_MEMBER_ALLOC_WITH_LOCALS,                                       \
+        CO2_DETAIL_BEG_MEMBER_ALLOC_WITHOUT_LOCALS,                                    \
+        CO2_DETAIL_BEG_MEMBER_ALLOC_WITHOUT_LOCALS,                                    \
+        CO2_DETAIL_BEG_MEMBER_ALLOC_WITHOUT_LOCALS, ~)                                 \
     (__VA_ARGS__)
 
 // 挂起点标签取自 __LINE__：头文件中的 inline/模板协程体在每个翻译单元展开出相同的

@@ -721,6 +721,162 @@ void explicitAllocatorIsUsedForTheFrame() {
 }
 
 // ---------------------------------------------------------------------------
+// 成员函数协程（CO2_BEG_MEMBER）。标准把隐式对象参数当作第一个协程参数：promise 的
+// 构造函数先收到 *this（左值），然后才是其余参数。协程体是局部类的成员函数，访问不到
+// 外层的 this，体内用 self 代替它——与 this 同类型的指针。
+
+struct MemberTask {
+    struct promise_type {
+        void const* object{}; // 构造函数收到的隐式对象参数的地址
+        int firstParameter{-1};
+        int result{-1};
+
+        template <class Object, class... Rest>
+        promise_type(Object& object_, int& firstParameter_, Rest&...)
+            : object{std::addressof(object_)}, firstParameter{firstParameter_} {}
+        promise_type() = default;
+
+        MemberTask get_return_object() {
+            return MemberTask{co2::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        co2::suspend_always initial_suspend() noexcept { return {}; }
+        co2::suspend_always final_suspend() noexcept { return {}; }
+        void return_value(int const value) { result = value; }
+        void unhandled_exception() { std::terminate(); }
+    };
+
+    explicit MemberTask(co2::coroutine_handle<promise_type> const handle_) noexcept
+        : handle{handle_} {}
+    MemberTask(MemberTask&& other) noexcept : handle{other.handle} {
+        other.handle = nullptr;
+    }
+    MemberTask(MemberTask const&) = delete;
+    MemberTask& operator=(MemberTask const&) = delete;
+    MemberTask& operator=(MemberTask&&) = delete;
+    ~MemberTask() {
+        if (handle) handle.destroy();
+    }
+
+    // 运行到完成，返回 co_return 的值。
+    int run() {
+        while (not handle.done())
+            handle.resume();
+        return handle.promise().result;
+    }
+
+    co2::coroutine_handle<promise_type> handle;
+};
+
+struct Accumulator {
+    // 非 const 成员函数：经 self 修改成员（含私有成员），成员的修改跨挂起点可见。
+    auto add(int amount) CO2_BEG_MEMBER(MemberTask, (amount)) {
+        static_assert(std::is_same<decltype(self), Accumulator* const>::value,
+                      "self has the type of this");
+        self->total += amount;
+        CO2_AWAIT(co2::suspend_always{});
+        self->total += self->bonus;
+        CO2_RETURN(self->total);
+    }
+    CO2_END
+
+    // const 成员函数：self 指向 const。带局部列表。
+    auto peek(int offset) const CO2_BEG_MEMBER(MemberTask, (offset), int seen{};) {
+        static_assert(std::is_same<decltype(self), Accumulator const* const>::value,
+                      "self is a pointer to const inside a const member function");
+        seen = self->total + offset;
+        CO2_AWAIT(co2::suspend_always{});
+        CO2_RETURN(seen);
+    }
+    CO2_END
+
+    // 没有参数：promise 只能用 *this 构造，这里的 promise_type 要求至少一个 int 参数，
+    // 所以退回默认构造——与标准的"找不到可行的构造函数就默认构造"一致。
+    auto current() CO2_BEG_MEMBER(MemberTask, ()) { CO2_RETURN(self->total); }
+    CO2_END
+
+    template <class Allocator>
+    auto addWithAllocator(Allocator allocator, int amount)
+        CO2_BEG_MEMBER_WITH_ALLOCATOR(MemberTask, allocator, (amount), int before{};) {
+        before = self->total;
+        self->total += amount;
+        CO2_RETURN(before);
+    }
+    CO2_END
+
+    int total{40};
+
+  private:
+    int bonus{1};
+};
+
+// 接口方法是协程：override / final 说明符跟在尾置返回类型之后，宏插不进去，所以在类内
+// 声明、类外用 CO2_BEG_MEMBER 定义。
+struct Source {
+    virtual ~Source() = default;
+    virtual MemberTask next(int step) = 0;
+};
+
+struct CountingSource final : Source {
+    MemberTask next(int step) override;
+    int position{10};
+};
+
+auto CountingSource::next(int step) CO2_BEG_MEMBER(MemberTask, (step)) {
+    self->position += step;
+    CO2_RETURN(self->position);
+}
+CO2_END
+
+void memberCoroutinesReceiveTheObjectAsTheirFirstParameter() {
+    {
+        Accumulator accumulator;
+        auto task = accumulator.add(1);
+        // promise(*this, 参数副本...)：对象是左值、是同一个对象；参数排在它后面。
+        CHECK(task.handle.promise().object == &accumulator);
+        CHECK(task.handle.promise().firstParameter == 1);
+        CHECK(accumulator.total == 40); // 惰性：还没运行
+        CHECK(task.run() == 42);
+        CHECK(accumulator.total == 42);
+    }
+    {
+        Accumulator const accumulator{};
+        auto task = accumulator.peek(2);
+        CHECK(task.handle.promise().object == &accumulator);
+        CHECK(task.run() == 42);
+    }
+    {
+        Accumulator accumulator;
+        auto task = accumulator.current();
+        CHECK(task.handle.promise().object == nullptr); // 默认构造的 promise
+        CHECK(task.run() == 40);
+    }
+    {
+        CountingSource concrete;
+        Source& source = concrete;
+        auto task = source.next(5);
+        CHECK(task.handle.promise().object == &concrete);
+        CHECK(task.run() == 15);
+        CHECK(concrete.position == 15);
+    }
+}
+
+void memberCoroutinesAcceptAnExplicitAllocator() {
+    AllocationStats stats;
+    {
+        Accumulator accumulator;
+        auto task =
+            accumulator.addWithAllocator(CountingAllocator<unsigned char>{stats}, 2);
+        CHECK(stats.allocations == 1);
+        // allocator 不在捕获列表里，不是协程参数：promise 收到的是 *this 与 amount。
+        CHECK(task.handle.promise().object == &accumulator);
+        CHECK(task.handle.promise().firstParameter == 2);
+        CHECK(task.run() == 40);
+        CHECK(accumulator.total == 42);
+    }
+    CHECK(stats.deallocations == 1);
+}
+
+// ---------------------------------------------------------------------------
 // 参数副本：by-value 参数直接移动进帧，恰好一次（[dcl.fct.def.coroutine]/13）。
 
 struct MoveCounter {
@@ -889,6 +1045,8 @@ int main() {
     handleRoundTripsThroughPromiseAndAddress();
     promiseOperatorNewAndAllocationFailureAreHonored();
     explicitAllocatorIsUsedForTheFrame();
+    memberCoroutinesReceiveTheObjectAsTheirFirstParameter();
+    memberCoroutinesAcceptAnExplicitAllocator();
     byValueParametersAreMovedIntoTheFrameExactlyOnce();
     overAlignedFramesAreAlignedOnEveryAllocationPath();
     localsAndReferenceParametersSurviveSuspension();

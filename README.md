@@ -51,6 +51,7 @@ int main() { return co2::syncWait(twice(21)) == 42 ? 0 : 1; }
 | `CO2_YIELD(e)` | `co_yield e;` |
 | `CO2_RETURN()` / `CO2_RETURN(e)` | `co_return;` / `co_return e;` |
 | `CO2_BEG_WITH_ALLOCATOR(R, alloc, (...), ...)` | `std::allocator_arg` 约定的帧分配 |
+| `CO2_BEG_MEMBER(R, (...), ...)` / `CO2_BEG_MEMBER_WITH_ALLOCATOR(...)` | 非静态成员函数的协程体：体内用 `self` 代替 `this` |
 
 返回类型是任何带 `promise_type` 的类型（或特化了 `co2::coroutine_traits<R>`）。
 
@@ -64,8 +65,10 @@ int main() { return co2::syncWait(twice(21)) == 42 ? 0 : 1; }
 - 协程体里直接声明的变量住在栈上，活不过挂起点。带初始化的声明跨越挂起点是编译错误；
   但**不带初始化的平凡类型**（`int sum;`）编译器不拦，恢复之后读到的是不确定的值——
   体内的声明一律带上初始化，需要跨挂起点的放进局部列表。
-- 成员函数可以是协程，但协程体是一个局部类的成员函数，访问不到外层的 `this`：把对象
-  作为参数传进来（`static auto run(Self& self, ...)`，体内写 `self.member`）。
+- 成员函数的协程体用 `CO2_BEG_MEMBER`。协程体是一个局部类的成员函数，访问不到外层的
+  `this` 和成员名，所以体内用 `self`（与 `this` 同类型的指针）代替：`self->member`。
+  promise 的构造函数先收到 `*this` 再是其余参数，与标准一致。带 `override` / `final`
+  的虚函数在类内声明、类外用宏定义（说明符跟在尾置返回类型之后，宏插不进去）。
 - awaiter 会被移动进帧，所以必须可移动构造；左值 awaitable 同样被复制/移动进去，而
   不是像标准那样就地使用。
 - `co_await` 只能是语句或赋值右侧；一行一个挂起点（标签取 `__LINE__`，保证头文件

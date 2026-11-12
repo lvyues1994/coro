@@ -89,7 +89,8 @@ endforeach()
 # 编译失败测试：定义 CO2_EXPECT_COMPILE_FAILURE 时源文件必须编不过。同一份源文件不带该
 # 宏的对照目标随正常构建一起编译，证明失败只来自被测的那一处，而不是别的笔误。
 set(co2_compile_fail_test_sources
-    await_inside_switch_compile_fail_test.cpp)
+    await_inside_switch_compile_fail_test.cpp
+    member_macro_outside_member_function_compile_fail_test.cpp)
 
 foreach(co2_test_source IN LISTS co2_compile_fail_test_sources)
     co2_test_target_name("${co2_test_source}" co2_test_target)

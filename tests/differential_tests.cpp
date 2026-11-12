@@ -377,6 +377,73 @@ template <class Make> EventLog runAggregate(Make make) {
     return log;
 }
 
+// ---------------------------------------------------------------------------
+// 场景 11：成员函数协程。隐式对象参数是第一个协程参数：promise 的构造函数先收到 *this
+// （左值），再是其余参数；体内访问的是同一个对象。
+
+template <class Lib> struct MemberProbe {
+    struct promise_type {
+        EventLog* log;
+
+        template <class Object, class... Rest>
+        promise_type(Object& object, EventLog& log_, int& amount, Rest&...)
+            : log{&log_} {
+            log->add("promise(object value=" + trace::intToString(object.value) +
+                     ", amount=" + trace::intToString(amount) + ")");
+        }
+
+        MemberProbe get_return_object() { return {}; }
+        typename Lib::SuspendNever initial_suspend() noexcept { return {}; }
+        typename Lib::SuspendNever final_suspend() noexcept { return {}; }
+        void return_void() { log->add("return_void"); }
+        void unhandled_exception() {}
+    };
+};
+
+struct Co2Widget {
+    auto bump(EventLog& log, int amount)
+        CO2_BEG_MEMBER(MemberProbe<Co2Lib>, (log, amount)) {
+        self->value += amount;
+        log.add("body value=" + trace::intToString(self->value));
+        CO2_RETURN();
+    }
+    CO2_END
+
+    auto read(EventLog& log, int amount) const
+        CO2_BEG_MEMBER(MemberProbe<Co2Lib>, (log, amount)) {
+        log.add("const body value=" + trace::intToString(self->value + amount));
+        CO2_RETURN();
+    }
+    CO2_END
+
+    int value{7};
+};
+
+struct StdWidget {
+    MemberProbe<StdLib> bump(EventLog& log, int amount) {
+        value += amount;
+        log.add("body value=" + trace::intToString(value));
+        co_return;
+    }
+
+    MemberProbe<StdLib> read(EventLog& log, int amount) const {
+        log.add("const body value=" + trace::intToString(value + amount));
+        co_return;
+    }
+
+    int value{7};
+};
+
+template <class Widget> EventLog runMember() {
+    EventLog log;
+    Widget widget;
+    widget.bump(log, 3);
+    log.add("-- after bump value=" + trace::intToString(widget.value));
+    auto const& constWidget = widget;
+    constWidget.read(log, 1);
+    return log;
+}
+
 template <class Task, class Make> EventLog runStartThrows(Make make, bool const lazy) {
     EventLog log;
     {
@@ -433,6 +500,8 @@ int main() {
             runDetached(co2Detached, false), runDetached(stdDetached, false));
     compare("aggregate promise is initialized from the parameters",
             runAggregate(co2Aggregate), runAggregate(stdAggregate));
+    compare("member function coroutine", runMember<Co2Widget>(),
+            runMember<StdWidget>());
 }
 
 // 库自己的 promise 类型不能被协程的参数构造。它们若是聚合类型，C++20 起第一个参数只要能

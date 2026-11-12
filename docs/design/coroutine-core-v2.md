@@ -514,9 +514,12 @@ harden、trampoline 账本、每帧原子门闩、每次异步等待 1～2 次�
   （`tests/await_inside_switch_compile_fail_test.cpp`）。需要分支时用 `if`/`else`，或把
   等待放到 switch 之外。
 - **D13 成员函数与 `this`**：标准把隐式对象参数当作第一个协程参数（promise 构造能
-  收到 `*this`，体内可以直接用成员）。这里协程体是局部类的成员函数，外层的 `this` 与
-  成员名都访问不到。成员函数可以是协程，但要把对象显式作为参数传进来（通常写成
-  `static` 成员函数加一个 `Self& self` 参数）。
+  收到 `*this`，体内可以直接用成员）。`CO2_BEG_MEMBER` 做到了前一半：`this` 存进参数
+  副本的最前面，promise 的构造函数先收到左值 `*this`（差分测试场景 11 与原生成员
+  协程一致）。后一半做不到：协程体是局部类的成员函数，外层的 `this` 与成员名都访问
+  不到，体内只能经 `self`（与 `this` 同类型的指针）写成 `self->member`。另外
+  `override` / `final` 跟在尾置返回类型之后，宏插不进去，带这些说明符的虚函数要在
+  类内声明、类外定义。在没有 `this` 的函数里用 `CO2_BEG_MEMBER` 是编译错误。
 - **D14 宏实参的个数**：捕获列表最多 8 个参数；`CO2_BEG` 的局部列表与 `CO2_RETURN` 的
   表达式里每个顶层逗号都多算一个宏实参，总数上限 64（`detail/preprocessor.hpp`）。
 
