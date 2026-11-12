@@ -10,6 +10,11 @@
 
 设计稿：`docs/design/completion-channels.md`。本计划覆盖它第 10 节的第 1～5 步。
 
+**状态：** 已执行完毕（2026-11-12），8 个任务对应提交 `7061abd`、`a53b8f0`、`b548501`、`97af10b`、`8a73db4`、`56504dd`、`a77431c`、`f81a80c`。每个任务都按这里的步骤做了：先确认只加测试时失败，再确认加上实现后通过；任务 8 的 13 个配置全部通过。执行时有两处与原计划不同，下文已同步：
+
+- 任务 5 的提交说明原来写"值路径不变"，实际提交时改成了分开报告两个数字：Task 等待子 Task 不变，`syncWait ready Task` 25.8 → 27.0 ns。
+- 各步"Expected"里全部通过时的那一行，原来写的是 `100% tests passed, 0 tests failed out of N`；这台机器上的 ctest 在没有失败时打印的是 `100% tests passed out of N`。
+
 ## Global Constraints
 
 - 库与测试的最低语言标准是 C++14，不使用 C++17 及以后的特性。
@@ -1515,7 +1520,7 @@ index 29e31ad..44628c9 100644
 
 - [ ] **Step 8: 构建并运行全部测试，确认通过**
 
-Expected: `100% tests passed, 0 tests failed out of 25`（原有 22 个，加上 `co2-vocabulary-tests` 与两个契约违规测试）。
+Expected: `100% tests passed out of 25`（原有 22 个，加上 `co2-vocabulary-tests` 与两个契约违规测试）。
 
 - [ ] **Step 9: 提交**
 
@@ -1981,7 +1986,7 @@ index 4aada83..31ac9fd 100644
 
 - [ ] **Step 4: 构建并运行全部测试，确认通过**
 
-Expected: `100% tests passed, 0 tests failed out of 25`。
+Expected: `100% tests passed out of 25`。
 
 - [ ] **Step 5: 更新基准里的调用点**
 
@@ -2872,7 +2877,7 @@ index 53a1dc6..dd8a6e3 100644
 
 - [ ] **Step 6: 构建并运行全部测试，确认通过**
 
-Expected: `100% tests passed, 0 tests failed out of 27`。
+Expected: `100% tests passed out of 27`。
 
 差分测试（`co2-differential-tests`）在其中：它用的 awaiter 没有 `await_completion()`，promise 没有那两个入口，走的仍是标准路径。再用 C++20 确认一次：
 
@@ -2881,7 +2886,7 @@ cmake -S . -B /tmp/co2-build/gcc20 -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER
 cmake --build /tmp/co2-build/gcc20 -j 12 && ctest --test-dir /tmp/co2-build/gcc20 -j 8
 ```
 
-Expected: `100% tests passed, 0 tests failed out of 27`。
+Expected: `100% tests passed out of 27`。
 
 - [ ] **Step 7: 提交**
 
@@ -3470,7 +3475,7 @@ index 31ac9fd..d9bcb06 100644
 
 - [ ] **Step 4: 构建并运行全部测试，确认通过**
 
-Expected: `100% tests passed, 0 tests failed out of 28`。其中 `co2-allocation-tests` 检查 `Task<int>(int)` 的帧仍是 176 字节：它通过，说明值与错误共用存储之后 promise 没有变大。
+Expected: `100% tests passed out of 28`。其中 `co2-allocation-tests` 检查 `Task<int>(int)` 的帧仍是 176 字节：它通过，说明值与错误共用存储之后 promise 没有变大。
 
 - [ ] **Step 5: 在 ASan + UBSan 下确认十万层的链**
 
@@ -3481,7 +3486,7 @@ cmake --build /tmp/co2-build/asan -j 12
 ASAN_OPTIONS=detect_leaks=0 ctest --test-dir /tmp/co2-build/asan -j 8
 ```
 
-Expected: `100% tests passed, 0 tests failed out of 28`。`aDeepChainPropagatesWithoutGrowingTheStack` 在默认的 8 MB 栈上通过，说明传播与析构都不递归。
+Expected: `100% tests passed out of 28`。`aDeepChainPropagatesWithoutGrowingTheStack` 在默认的 8 MB 栈上通过，说明传播与析构都不递归。
 
 - [ ] **Step 6: 量一下基准**
 
@@ -3512,8 +3517,9 @@ docs/design/completion-channels.md 第 3.4 节、第 10 节第 5 步。
   awaiter，以及还没接上的 whenAll、JoinHandle 的等待、AsyncGenerator）照旧从它
   那里拿到异常；已停止没有值可给，是契约违规。
 
-失败沿 100 层的链每层 558 ns → 45 ns（GCC 13.3 -O2），值路径不变。十万层的链上
-错误与已停止的传播不长栈（ASan + UBSan 下通过）。
+基准（GCC 13.3 -O2）：失败沿 100 层的链每层 558 ns → 45 ns；Task 等待子 Task
+（symmetric Task transfer）不变，约 12 ns；syncWait ready Task 25.8 → 27.0 ns。
+十万层的链上错误与已停止的传播不长栈（ASan + UBSan 下通过）。
 EOF
 ```
 
@@ -3735,7 +3741,7 @@ index d9bcb06..b1ad2ae 100644
 
 - [ ] **Step 4: 构建并运行全部测试，确认通过**
 
-Expected: `100% tests passed, 0 tests failed out of 28`。
+Expected: `100% tests passed out of 28`。
 
 - [ ] **Step 5: 提交**
 
@@ -4165,7 +4171,7 @@ index b1ad2ae..55feece 100644
 
 - [ ] **Step 5: 构建并运行全部测试，确认通过**
 
-Expected: `100% tests passed, 0 tests failed out of 28`。
+Expected: `100% tests passed out of 28`。
 
 `co2-allocation-tests` 里的 `syncWaitOfAsResultTaskAddsNoFrame` 检查的就是 Step 4 的重载：没有它时，这个测试报 `allocation mismatch ...: expected 1, got 2`（通用重载多包了一层协程）。
 
@@ -4442,7 +4448,7 @@ for cfg in gcc14 clang14 gcc17 gcc20 gcc23 clang20 clang23 libcxx gccrel clangre
 done
 ```
 
-Expected: 13 行，每行都是 `100% tests passed, 0 tests failed out of 28`。
+Expected: 13 行，每行都是 `100% tests passed out of 28`。
 
 - [ ] **Step 4: 提交**
 
