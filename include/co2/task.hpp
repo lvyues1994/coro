@@ -145,12 +145,20 @@ template <class T> struct TaskPromise {
         return std::forward<Awaitable>(awaitable);
     }
 
-    // 这个 Task 是怎么结束的。给认识 await_completion() 的等待者用：错误被移出去，所以
-    // 每次等待只问一次。值已被取走（empty）时也报告"有值"，由随后的 result() 诊断。
+    // 这个 Task 是怎么结束的。给认识 await_completion() 的等待者用：错误在这里被取走。
+    // 结果已被取走（empty）时报告"有值"，由随后的 result() 诊断为契约违规。
     Completion completion() noexcept {
         if (state == TaskState::stopped) return Completion::stopped();
-        if (state == TaskState::error) return Completion::error(std::move(storage.error));
+        if (state == TaskState::error) return Completion::error(takeError());
         return Completion::value();
+    }
+
+    // 取走错误，只可一次，与取值相同：之后本 Task 没有结果可给。前置条件：state 是 error。
+    Error takeError() noexcept {
+        Error taken{std::move(storage.error)};
+        storage.error.~Error();
+        state = TaskState::empty;
+        return taken;
     }
 
     // 取走值，只可一次。它同时是不认识 await_completion() 的调用方的兜底（手写的包装
@@ -342,8 +350,7 @@ struct TaskAccess {
         CO2_CONTRACT_CHECK(task.handle && task.handle.done());
         auto& promise = task.handle.promise();
         if (promise.state == TaskState::stopped) return Result<T>::stopped();
-        if (promise.state == TaskState::error)
-            return Result<T>{std::move(promise.storage.error)};
+        if (promise.state == TaskState::error) return Result<T>{promise.takeError()};
         return valueAsResult(task, std::is_void<T>{});
     }
 

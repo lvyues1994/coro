@@ -27,7 +27,8 @@ set(co2_contract_violation_test_sources
     optional_empty_value_contract_violation_test.cpp
     error_from_success_code_contract_violation_test.cpp
     stopped_without_entry_contract_violation_test.cpp
-    stopped_through_legacy_awaiter_contract_violation_test.cpp)
+    stopped_through_legacy_awaiter_contract_violation_test.cpp
+    task_error_taken_twice_contract_violation_test.cpp)
 
 # 构建测试用的 C++ 标准。库的最低要求是 14，默认就测它；CI 另以 17 / 20 / 23 各跑一遍，
 # 保证较新的标准下（弃用告警、更严格的规则）同样干净。
