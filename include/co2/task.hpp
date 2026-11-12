@@ -34,6 +34,10 @@ namespace detail {
 struct TaskAccess;
 
 template <class T> struct TaskPromise {
+    // 声明构造函数是为了让它不是聚合类型。聚合在 C++20 起可以用圆括号初始化，"能用参数
+    // 副本构造 promise 就传入"的规则会因此拿协程的第一个参数去初始化 continuation。
+    TaskPromise() = default;
+
     Task<T> get_return_object() noexcept;
 
     suspend_always initial_suspend() noexcept { return {}; }

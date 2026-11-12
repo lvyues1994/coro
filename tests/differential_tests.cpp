@@ -11,7 +11,10 @@
 #include <utility>
 #include <vector>
 
+#include "co2/async_generator.hpp"
 #include "co2/coroutine.hpp"
+#include "co2/generator.hpp"
+#include "co2/task.hpp"
 #include "trace.hpp"
 
 namespace {
@@ -340,6 +343,40 @@ template <class Make> EventLog runDetached(Make make, bool const finalReady) {
     return log;
 }
 
+// ---------------------------------------------------------------------------
+// 场景 10：聚合类型的 promise。"能用参数副本构造 promise 就传入"在 C++20 起也包括圆括号
+// 聚合初始化：GCC 与 Clang 的原生协程都会拿第一个参数去初始化聚合 promise 的第一个成员，
+// co2 的 is_constructible 判断与它们一致。这也是库自己的 promise 类型不能是聚合的原因，
+// 见本文件末尾的静态断言。
+
+template <class Lib> struct AggregateTask {
+    struct promise_type {
+        int firstMember = -1;
+
+        AggregateTask get_return_object() { return AggregateTask{firstMember}; }
+        typename Lib::SuspendNever initial_suspend() noexcept { return {}; }
+        typename Lib::SuspendNever final_suspend() noexcept { return {}; }
+        void return_void() {}
+        void unhandled_exception() {}
+    };
+
+    int promiseFirstMember;
+};
+
+auto co2Aggregate(int value) CO2_BEG(AggregateTask<Co2Lib>, (value)) {
+    static_cast<void>(value);
+    CO2_RETURN();
+}
+CO2_END
+
+AggregateTask<StdLib> stdAggregate([[maybe_unused]] int value) { co_return; }
+
+template <class Make> EventLog runAggregate(Make make) {
+    EventLog log;
+    log.add("promise first member " + trace::intToString(make(7).promiseFirstMember));
+    return log;
+}
+
 template <class Task, class Make> EventLog runStartThrows(Make make, bool const lazy) {
     EventLog log;
     {
@@ -394,4 +431,19 @@ int main() {
             runDetached(co2Detached, true), runDetached(stdDetached, true));
     compare("final_suspend does not suspend (await_suspend -> false)",
             runDetached(co2Detached, false), runDetached(stdDetached, false));
+    compare("aggregate promise is initialized from the parameters",
+            runAggregate(co2Aggregate), runAggregate(stdAggregate));
 }
+
+// 库自己的 promise 类型不能被协程的参数构造。它们若是聚合类型，C++20 起第一个参数只要能
+// 转换成 promise 的第一个成员（续体句柄、当前元素指针）就会被拿去初始化它：GCC 报
+// -Wmissing-field-initializers，AsyncGenerator 的消费者句柄还会因此一开始就非空。
+static_assert(not std::is_constructible<co2::Task<int>::promise_type,
+                                        co2::coroutine_handle<>&>::value,
+              "TaskPromise must not be constructible from coroutine parameters");
+static_assert(
+    not std::is_constructible<co2::Generator<int>::promise_type, int*&>::value,
+    "GeneratorPromise must not be constructible from coroutine parameters");
+static_assert(not std::is_constructible<co2::AsyncGenerator<int>::promise_type,
+                                        co2::coroutine_handle<>&>::value,
+              "AsyncGeneratorPromise must not be constructible from coroutine parameters");

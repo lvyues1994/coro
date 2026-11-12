@@ -37,6 +37,10 @@ template <class T> struct AsyncGeneratorPromise {
 
     using Handle = coroutine_handle<AsyncGeneratorPromise>;
 
+    // 声明构造函数是为了让它不是聚合类型：C++20 起聚合可以用圆括号初始化，协程的第一个
+    // 参数若是句柄，就会被拿去初始化 consumer——生成器一开始就像有一个未完成的 next()。
+    AsyncGeneratorPromise() = default;
+
     AsyncGenerator<T> get_return_object() noexcept;
 
     suspend_always initial_suspend() noexcept { return {}; }

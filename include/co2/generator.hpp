@@ -65,6 +65,10 @@ template <class Ref, class V> struct GeneratorPromise {
     using Stored = typename std::remove_cv<Element>::type;
     using Handle = coroutine_handle<GeneratorPromise>;
 
+    // 声明构造函数是为了让它不是聚合类型：C++20 起聚合可以用圆括号初始化，协程的第一个
+    // 参数若是指针，就会被拿去初始化 current。
+    GeneratorPromise() = default;
+
     Generator<Ref, V> get_return_object() noexcept;
 
     suspend_always initial_suspend() noexcept { return {}; }
