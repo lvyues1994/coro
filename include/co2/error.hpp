@@ -14,6 +14,9 @@
 // （std::exception_ptr）。不分配，不需要 RTTI；错误码的两个字段与 exception_ptr 共用
 // 存储，所以在 exception_ptr 只有一个指针宽的平台上它与 std::error_code 一样大。
 //
+// 禁用异常的构建里（CO2_HAS_EXCEPTIONS 为 0）它只装错误码：接收 exception_ptr 的构造
+// 函数与 exception() 不存在，raise() 是契约违规。
+//
 // 用户自己的错误枚举按 <system_error> 的常规方式接入（std::is_error_code_enum 的特化
 // 加上 ADL 能找到的 make_error_code），之后可以直接隐式转换成 Error。
 
@@ -66,27 +69,35 @@ struct Error {
                               std::is_error_code_enum<Enum>::value>::type>
     Error(Enum const code) noexcept : Error{std::error_code{code}} {}
 
+#if CO2_HAS_EXCEPTIONS
     // 前置条件：exception 非空。
     explicit Error(std::exception_ptr exception) noexcept
         : number{0}, kind{Kind::exception} {
         CO2_CONTRACT_CHECK(exception != nullptr);
         ::new (static_cast<void*>(&captured)) std::exception_ptr{std::move(exception)};
     }
+#endif
 
     Error(Error const& other) noexcept : number{other.number}, kind{other.kind} {
-        if (kind == Kind::exception)
+#if CO2_HAS_EXCEPTIONS
+        if (kind == Kind::exception) {
             ::new (static_cast<void*>(&captured)) std::exception_ptr{other.captured};
-        else
-            category = other.category;
+            return;
+        }
+#endif
+        category = other.category;
     }
 
     // 被移动的一方只保证还能析构和赋值，内容不再有意义。
     Error(Error&& other) noexcept : number{other.number}, kind{other.kind} {
-        if (kind == Kind::exception)
+#if CO2_HAS_EXCEPTIONS
+        if (kind == Kind::exception) {
             ::new (static_cast<void*>(&captured))
                 std::exception_ptr{std::move(other.captured)};
-        else
-            category = other.category;
+            return;
+        }
+#endif
+        category = other.category;
     }
 
     Error& operator=(Error other) noexcept {
@@ -96,7 +107,9 @@ struct Error {
     }
 
     ~Error() {
+#if CO2_HAS_EXCEPTIONS
         if (kind == Kind::exception) captured.~exception_ptr();
+#endif
     }
 
     // 装着异常时返回 Errc::unhandled_exception。
@@ -105,15 +118,24 @@ struct Error {
         return std::error_code{number, *category};
     }
 
+#if CO2_HAS_EXCEPTIONS
     // 装着错误码时为空。
     std::exception_ptr exception() const noexcept {
         return kind == Kind::exception ? captured : std::exception_ptr{};
     }
+#endif
 
-    // 变回异常：装着异常就重抛原异常，装着错误码就抛 std::system_error。
+    // 变回异常：装着异常就重抛原异常，装着错误码就抛 std::system_error。禁用异常的
+    // 构建里没有异常可抛，走到这里就是契约违规：错误到达了根，或者到达了一个只能靠
+    // 抛出来报告它的地方。想把错误当值拿到，在等待的地方套 co2::asResult。
     [[noreturn]] void raise() const {
+#if CO2_HAS_EXCEPTIONS
         if (kind == Kind::exception) std::rethrow_exception(captured);
         throw std::system_error{code()};
+#else
+        CO2_CONTRACT_FAIL("an error had to be raised in a build without exceptions; "
+                          "take it as a value with co2::asResult instead");
+#endif
     }
 
   private:
@@ -121,7 +143,9 @@ struct Error {
 
     union {
         std::error_category const* category;
+#if CO2_HAS_EXCEPTIONS
         std::exception_ptr captured;
+#endif
     };
     int number;
     Kind kind;

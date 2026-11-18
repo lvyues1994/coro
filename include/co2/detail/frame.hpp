@@ -33,6 +33,10 @@ CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(4702)
 // 变换里的 try 块分在两处：initial-await-resume-called 为假的那一段（promise 构造到
 // initial awaiter 的 await_suspend）在 ramp（runRamp）里，异常销毁帧并抛给调用方；为真
 // 的那一段（initial awaiter 的 await_resume 起）在 step 里，异常进入 unhandled_exception。
+//
+// 禁用异常的构建里（CO2_HAS_EXCEPTIONS 为 0）没有这个 try / catch，promise 也不需要
+// unhandled_exception()——与原生编译器在 -fno-exceptions 下的要求一致。前一段的回滚靠
+// 守卫对象而不是 catch，所以两种构建下是同一份代码。
 
 namespace co2 {
 namespace detail {
@@ -474,9 +478,10 @@ struct CoroutineFrame
     using Memory = FrameMemory<CoroutineFrame, Promise, FrameAllocator>;
     using HasFailureObject =
         std::integral_constant<bool, HasAllocationFailureObject<Promise>::value>;
-    // allocator 以 bad_alloc 报告失败；promise 的 operator new 以返回空报告。
+    // allocator 以 bad_alloc 报告失败；promise 的 operator new 以返回空报告。禁用异常的
+    // 构建里前一种无从接住，只剩后一种。
     using CatchesBadAlloc = std::integral_constant<
-        bool, HasAllocationFailureObject<Promise>::value &&
+        bool, CO2_HAS_EXCEPTIONS != 0 && HasAllocationFailureObject<Promise>::value &&
                   not HasPromiseOperatorNew<Promise>::value>;
 
     // 分配并初始化帧：参数副本 → promise（能用参数副本构造就传入）→ 局部（Body）。
@@ -531,6 +536,7 @@ struct CoroutineFrame
         auto* const frame = fromHeader(header);
         auto& core = frame->core;
         core.markRunning();
+#if CO2_HAS_EXCEPTIONS
         try {
             return core.body()(core);
         } catch (...) {
@@ -545,6 +551,9 @@ struct CoroutineFrame
             core.markRunning();
             return core.enterFinalSuspend();
         }
+#else
+        return core.body()(core);
+#endif
     }
 
     // 销毁协程状态：等待中的 awaiter、仍存活的局部（Body）、promise、参数副本，然后
@@ -574,6 +583,7 @@ struct CoroutineFrame
         return Memory::allocate(frameAllocator);
     }
 
+#if CO2_HAS_EXCEPTIONS
     static CoroutineFrame* allocateOrNull(FrameAllocator& frameAllocator,
                                           std::true_type) {
         try {
@@ -582,6 +592,7 @@ struct CoroutineFrame
             return nullptr;
         }
     }
+#endif
 
     // 结束帧对象自身的生命周期并释放内存。
     static void release(CoroutineFrame* const frame) noexcept {

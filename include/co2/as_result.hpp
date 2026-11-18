@@ -64,11 +64,15 @@ template <class Inner> struct AsResultAwaiter {
             completionOf(inner, typename HasAwaitCompletion<Inner>::type{});
         if (completion.isStopped()) return ResultType::stopped();
         if (completion.hasError()) return ResultType{std::move(completion).error()};
+#if CO2_HAS_EXCEPTIONS
         try {
             return resumeInner(std::is_void<Awaited>{});
         } catch (...) {
             return ResultType{Error{std::current_exception()}};
         }
+#else
+        return resumeInner(std::is_void<Awaited>{});
+#endif
     }
 
   private:

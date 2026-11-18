@@ -28,8 +28,26 @@ set(co2_contract_violation_test_sources
     optional_empty_value_contract_violation_test.cpp
     error_from_success_code_contract_violation_test.cpp
     stopped_without_entry_contract_violation_test.cpp
-    stopped_through_legacy_awaiter_contract_violation_test.cpp
-    task_error_taken_twice_contract_violation_test.cpp)
+    stopped_through_legacy_awaiter_contract_violation_test.cpp)
+
+# 禁用异常的构建。打开之后，全部测试以 -fno-exceptions -fno-rtti 编译。库自己从编译器的
+# 开关判断有没有异常（CO2_HAS_EXCEPTIONS，见 config.hpp），这里不传任何宏给它。
+option(CO2_TEST_NO_EXCEPTIONS "Build the co2 tests with exceptions and RTTI disabled" OFF)
+if(CO2_TEST_NO_EXCEPTIONS AND MSVC)
+    message(FATAL_ERROR "CO2_TEST_NO_EXCEPTIONS is only set up for GCC and Clang")
+endif()
+
+if(CO2_TEST_NO_EXCEPTIONS)
+    # 只在没有异常时才成立的契约违规：错误无处可抛。
+    list(APPEND co2_contract_violation_test_sources
+         no_exceptions_error_at_root_contract_violation_test.cpp
+         no_exceptions_error_without_entry_contract_violation_test.cpp
+         no_exceptions_error_through_legacy_awaiter_contract_violation_test.cpp)
+else()
+    # 这一个测的是"带着异常的错误被取两次"，没有异常时无从谈起。
+    list(APPEND co2_contract_violation_test_sources
+         task_error_taken_twice_contract_violation_test.cpp)
+endif()
 
 # 构建测试用的 C++ 标准。库的最低要求是 14，默认就测它；CI 另以 17 / 20 / 23 各跑一遍，
 # 保证较新的标准下（弃用告警、更严格的规则）同样干净。
@@ -67,6 +85,9 @@ function(co2_configure_test_target target)
                 -Werror=uninitialized
                 -Werror=suggest-override
                 -Werror=vla)
+        if(CO2_TEST_NO_EXCEPTIONS)
+            target_compile_options(${target} PRIVATE -fno-exceptions -fno-rtti)
+        endif()
     endif()
 endfunction()
 
@@ -98,7 +119,8 @@ endforeach()
 # 宏的对照目标随正常构建一起编译，证明失败只来自被测的那一处，而不是别的笔误。
 set(co2_compile_fail_test_sources
     await_inside_switch_compile_fail_test.cpp
-    member_macro_outside_member_function_compile_fail_test.cpp)
+    member_macro_outside_member_function_compile_fail_test.cpp
+    has_exceptions_override_compile_fail_test.cpp)
 
 foreach(co2_test_source IN LISTS co2_compile_fail_test_sources)
     co2_test_target_name("${co2_test_source}" co2_test_target)
@@ -133,8 +155,9 @@ endforeach()
 add_library(co2-header-self-containment-tests OBJECT ${co2_header_test_sources})
 co2_configure_test_target(co2-header-self-containment-tests)
 
-# 与原生 co_await 的差分测试只在编译器支持标准协程时构建。
-if("cxx_std_20" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+# 与原生 co_await 的差分测试只在编译器支持标准协程时构建。它比对的事件序列里有异常
+# 路径，禁用异常的构建不参加。
+if("cxx_std_20" IN_LIST CMAKE_CXX_COMPILE_FEATURES AND NOT CO2_TEST_NO_EXCEPTIONS)
     foreach(co2_cpp20_source IN ITEMS differential_tests.cpp)
         co2_test_target_name("${co2_cpp20_source}" co2_test_target)
         add_executable(${co2_test_target} ${co2_cpp20_source})

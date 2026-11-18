@@ -113,8 +113,10 @@ template <class T> struct TaskPromise {
         state = TaskState::value;
     }
 
+#if CO2_HAS_EXCEPTIONS
     // 异常只在这里被捕获一次；之后它是一个按值传的 Error，到根上才重新抛出。
     void unhandled_exception() noexcept { fail(Error{std::current_exception()}); }
+#endif
 
     // 等待的操作出错 / 已停止（或者体内 CO2_AWAIT(just_error(e)) 之类）：本 Task 以同样的
     // 结果结束。由恢复点在协程体收尾之后调用，见 FrameCore::finishUnlessValue。
@@ -395,11 +397,15 @@ struct TaskAccess {
 
     // 取值时 T 的移动构造抛出：与 asResult 的其他路径一样接成错误。
     template <class T> static Result<T> valueAsResult(Task<T>& task, std::false_type) {
+#if CO2_HAS_EXCEPTIONS
         try {
             return Result<T>{takeResult(task)};
         } catch (...) {
             return Result<T>{Error{std::current_exception()}};
         }
+#else
+        return Result<T>{takeResult(task)};
+#endif
     }
 
     static Result<void> valueAsResult(Task<void>& task, std::true_type) {

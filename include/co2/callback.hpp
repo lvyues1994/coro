@@ -33,7 +33,7 @@
 //
 //   continuation(args...)             有值：就地构造 T
 //   continuation.setError(code)       出错：一个 std::error_code
-//   continuation.setException(eptr)   出错：一个捕获的异常
+//   continuation.setException(eptr)   出错：一个捕获的异常（禁用异常的构建里没有）
 //   continuation.setStopped()         已停止
 //
 // 后三种经 await_completion() 按值交给等待它的协程，那个协程就此结束（见
@@ -81,12 +81,16 @@ template <class T> struct Continuation {
         CO2_CONTRACT_CHECK(operation != nullptr);
         operation->claim();
         unsigned outcome = CallbackAwaitable<T>::HasValue;
+#if CO2_HAS_EXCEPTIONS
         try {
             operation->storage.value.construct(std::forward<Args>(args)...);
         } catch (...) {
             operation->storeException(std::current_exception());
             outcome = CallbackAwaitable<T>::HasException;
         }
+#else
+        operation->storage.value.construct(std::forward<Args>(args)...);
+#endif
         operation->complete(outcome);
     }
 
@@ -98,6 +102,7 @@ template <class T> struct Continuation {
         operation->complete(CallbackAwaitable<T>::HasCode);
     }
 
+#if CO2_HAS_EXCEPTIONS
     // 以异常完成等待。前置条件：error 非空。
     void setException(std::exception_ptr error) const {
         CO2_CONTRACT_CHECK(operation != nullptr && error != nullptr);
@@ -105,6 +110,7 @@ template <class T> struct Continuation {
         operation->storeException(std::move(error));
         operation->complete(CallbackAwaitable<T>::HasException);
     }
+#endif
 
     // 以已停止完成等待：操作被取消了，没有结果。
     void setStopped() const {
@@ -148,7 +154,9 @@ template <class T> struct CallbackAwaitable {
     ~CallbackAwaitable() {
         auto const flags = state.load(std::memory_order_relaxed);
         if ((flags & HasValue) != 0U) storage.value.destroy();
+#if CO2_HAS_EXCEPTIONS
         if ((flags & HasException) != 0U) storage.exception.~exception_ptr();
+#endif
     }
 
     bool await_ready() const noexcept { return false; }
@@ -208,7 +216,9 @@ template <class T> struct CallbackAwaitable {
 
         detail::Uninitialized<T> value;
         std::error_code code;
+#if CO2_HAS_EXCEPTIONS
         std::exception_ptr exception;
+#endif
     };
 
     // 续体只能调用一次。
@@ -240,14 +250,20 @@ template <class T> struct CallbackAwaitable {
         state.fetch_and(~HasValue, std::memory_order_relaxed);
     }
 
+#if CO2_HAS_EXCEPTIONS
     void storeException(std::exception_ptr error) noexcept {
         ::new (static_cast<void*>(&storage.exception))
             std::exception_ptr{std::move(error)};
     }
+#endif
 
     // 把存着的错误交出去，只可一次。捕获的异常被移走，留下的空壳由析构函数清理。
     Error takeError(unsigned const flags) noexcept {
+#if CO2_HAS_EXCEPTIONS
         if ((flags & HasException) != 0U) return Error{std::move(storage.exception)};
+#else
+        static_cast<void>(flags);
+#endif
         return Error{storage.code};
     }
 

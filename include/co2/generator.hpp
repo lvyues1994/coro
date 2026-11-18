@@ -91,7 +91,9 @@ template <class Ref, class V> struct GeneratorPromise {
 
     void return_void() noexcept {}
 
+#if CO2_HAS_EXCEPTIONS
     void unhandled_exception() noexcept { error = std::current_exception(); }
+#endif
 
     // std::generator 删除 await_transform：生成器体内不允许 co_await。
     template <class Awaitable>
@@ -168,9 +170,12 @@ template <class Ref, class V> struct GeneratorPromise {
             return child;
         }
 
+        // 内层逃出的异常在这里（父层的 elements_of 表达式处）重新抛出。
         void await_resume() {
+#if CO2_HAS_EXCEPTIONS
             auto& childPromise = nested.handle.promise();
             if (childPromise.error) std::rethrow_exception(childPromise.error);
+#endif
         }
     };
 
@@ -180,11 +185,15 @@ template <class Ref, class V> struct GeneratorPromise {
                                          std::is_same<Range, Generator<Ref, V>>{})};
     }
 
+    // 生成器体内逃出的异常在 begin() / ++ 处抛给消费者。禁用异常的构建里生成器不会
+    // 失败：体内不能等待，也就没有错误与已停止这两种结果。
     void rethrowIfFailed() {
+#if CO2_HAS_EXCEPTIONS
         if (not error) return;
         auto pending = std::exception_ptr{};
         std::swap(pending, error);
         std::rethrow_exception(pending);
+#endif
     }
 
     Element* current{};
@@ -192,7 +201,9 @@ template <class Ref, class V> struct GeneratorPromise {
     GeneratorPromise* root{this};
     Handle parent;
     Generator<Ref, V>* owner{}; // 嵌套时：父层 awaiter 里拥有本帧的那个 Generator
+#if CO2_HAS_EXCEPTIONS
     std::exception_ptr error;
+#endif
     ResultStorage<Stored> stored;
 
   private:

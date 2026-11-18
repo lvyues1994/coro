@@ -100,8 +100,10 @@ template <class T> struct AsyncGeneratorPromise {
 
     void return_void() noexcept {}
 
+#if CO2_HAS_EXCEPTIONS
     // 异常只在这里被捕获一次，之后是一个按值传的 Error。
     void unhandled_exception() noexcept { fail(Error{std::current_exception()}); }
+#endif
 
     // 生产者等待的操作出错 / 已停止（或者它自己 with_error / just_error）：流到此为止。
     void return_error(Error error) noexcept { fail(std::move(error)); }
