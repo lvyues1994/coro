@@ -1,11 +1,10 @@
 # 三种完成方式：值、错误、已停止——以及禁用异常的构建
 
-状态：设计已确认（2026-11-12）。第 10 节的第 1～8 步已经实现：词汇类型、根返回
-optional、恢复点与 promise 的两个入口、`Task` 四态、`just_error` / `with_error` /
-`asResult`、四个组件接上 `await_completion()`、`just_stopped` / `stopIfRequested` /
-`unstoppable`、`scheduleOn` 取消点。第 9、10 步（禁用异常的构建、文档收尾）尚未实现。
-设计确认当天对照库的代码评审过一轮并修订；哪些论断验证过、哪些没有，以及实现时与
-本文不同的几处，见第 12 节。
+状态：设计已确认（2026-11-12），第 10 节的十步全部实现：词汇类型、根返回 optional、
+恢复点与 promise 的两个入口、`Task` 四态、`just_error` / `with_error` / `asResult`、
+四个组件接上 `await_completion()`、`just_stopped` / `stopIfRequested` / `unstoppable`、
+`scheduleOn` 取消点、禁用异常的构建、文档收尾。设计确认当天对照库的代码评审过一轮并
+修订；哪些论断验证过、哪些没有，以及实现时与本文不同的几处，见第 12 节。
 
 ## 0. 问题
 
@@ -400,17 +399,21 @@ promise 没有对应入口时（用户自定义的返回类型）：
 ## 5. 禁用异常的构建
 
 - `config.hpp` 新增 `CO2_HAS_EXCEPTIONS`，由编译器宏自动得出（GCC / Clang 的
-  `__cpp_exceptions`，MSVC 的 `_CPPUNWIND`）。不提供手动覆盖：关着异常却让库保留
-  catch 没有意义，开着异常却让库去掉 catch 则是资源泄漏。
+  `__cpp_exceptions` 与 `__EXCEPTIONS`，MSVC 的 `_CPPUNWIND`）。不提供手动覆盖：关着
+  异常却让库保留 catch 没有意义，开着异常却让库去掉 catch 则是资源泄漏。使用者自己
+  定义这个宏是编译错误。
 - 为 0 时消失的东西：
-  - 内部回滚用的 `try` / `catch`（创建帧、超对齐分配、线程池构造）。没有人能抛，
-    这些路径本来就走不到。
   - 协程体变换里的 catch。promise 不再需要 `unhandled_exception()`，与原生编译器在
     `-fno-exceptions` 下的要求一致。
-  - `Error` 里装异常的那一半、`Error::exception()`、`Continuation::setException`。
+  - `Error` 里装异常的那一半、`Error::exception()`、`Continuation::setException`、
+    `GeneratorPromise` 里存异常的成员。
+  - 把异常接成错误的三处 catch：`asResult` 包住 `await_resume()` 的、`Task` 取值时
+    包住移动构造的、`Continuation::operator()` 包住结果构造的。
   - `Error::raise()` 与根上"抛出"的那条路，换成契约违规。
   - 靠捕获 `bad_alloc` 触发 `get_return_object_on_allocation_failure` 的那条路；
     promise 的 `operator new` 返回空的那条路保留。
+- 内部的回滚（创建帧的三步、超对齐块的构造、线程池启动线程）不随这个宏变化：它们
+  改成了局部的守卫对象，不用 `try` / `catch`，两种构建下是同一份代码。
 - 第 2～4 节的值通道在两种构建下是同一份代码，不随这个宏变化。
 - 分配失败时全局 `operator new` 的行为由运行时决定（通常是终止），与任何禁用异常的
   程序相同。
@@ -511,8 +514,10 @@ C++ 工作草案的原文（第 12 节）。
   适应返回 optional 的根。
 - 与原生协程的差分测试只在开异常时构建。原生协程不认识 `await_completion()`，新通道
   没有差分覆盖，只靠上面的测试。
-- 新增 CMake 选项，给测试加 `-fno-exceptions -fno-rtti`；CI 增加 GCC 与 Clang 各一个
-  这样的作业。
+- 新增 CMake 选项 `CO2_TEST_NO_EXCEPTIONS`（以及同名用途的 Preset `no-exceptions`），
+  给测试加 `-fno-exceptions -fno-rtti`；CI 增加这样的作业，GCC 与 Clang 各以 Debug、
+  Release 跑一遍。只在这种构建下成立的三条契约违规（错误到达根、到达没有
+  `return_error()` 的 promise、经过只转发三个成员的包装 awaiter）各有一个测试。
 - 第 4 节列出的每一条新增契约违规各有一个测试。
 - 基准新增两行：错误、已停止沿 Task 链每层的成本。错误那一行先于其他改动加入，用
   今天的异常路径跑出对照值——第 0 节与 3.5 的数字来自一次性的测量，不在仓库里。
@@ -586,8 +591,25 @@ awaiter 上再恢复等待者。
 - `Result<T>` 不能默认构造，作帧局部时写成 `co2::optional<co2::Result<T>>`；
   `asResult(x)` 与 `unstoppable(x)` 要直接写在等待它们的地方。
 
+**第 9 步实现时与本文不同的几处**（已同步到正文）
+
+- 内部回滚没有做成"为 0 时消失的 `try` / `catch`"，而是先改成守卫对象，于是不需要
+  条件编译（第 5 节）。改之前先补了测试：帧的三步构造各自失败时的回滚、超对齐块构造
+  失败时归还内存，此前都没有覆盖。
+- 少掉的东西比原先列的多两项：`GeneratorPromise` 里存异常的成员，以及把异常接成错误的
+  三处 catch。
+- 使用者自己定义 `CO2_HAS_EXCEPTIONS` 是编译错误，有一个必须编译失败的测试守着。
+- CI 的作业是四个而不是两个：两个编译器各加了 Release。
+
+**禁用异常的构建实测过的**
+
+GCC 13 与 Clang 18，`-fno-exceptions -fno-rtti`：C++14 的 Debug 与 Release、GCC 的
+C++20、Clang 的 C++23、libc++、ASan + UBSan、TSan，共九个配置，各 32 个测试全部通过。
+同一份测试源码在开着异常的十三个配置下各 31 个测试也全部通过。
+
 **尚未验证的**
 
-- 禁用异常的构建（第 5 节）没有任何实测。
 - MSVC：`Error` 的大小、`#pragma detect_mismatch`、`_CPPUNWIND` 的判断都无法在本机
-  验证。
+  验证；MSVC 关掉异常的构建在测试里没有配置（`CO2_TEST_NO_EXCEPTIONS` 只为 GCC 与
+  Clang 准备）。
+- 基准程序没有在禁用异常的构建下编译过：它的"失败"一项靠 `throw` 产生错误。

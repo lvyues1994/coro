@@ -237,8 +237,40 @@ CO2_AWAIT(co2::unstoppable(co2::scheduleOn(pool)));   // 对这一次等待隐�
   协程体内重新抛出，走 `unhandled_exception()`；没有 `return_stopped()` 时"已停止"是
   契约违规。
 
-完整的设计与落地顺序见 `docs/design/completion-channels.md`。禁用异常的构建
-（`-fno-exceptions`）还没有做，是那份设计的最后一步。
+完整的设计见 `docs/design/completion-channels.md`。
+
+## 禁用异常的构建
+
+库可以在 `-fno-exceptions`（通常连同 `-fno-rtti`）下编译和使用，不需要定义任何宏：
+`config.hpp` 从编译器的开关得出 `CO2_HAS_EXCEPTIONS`。值、错误码、已停止三种完成方式
+在两种构建下是同一份代码，上一节的写法原样适用：失败用 `co2::just_error(code)` 产生，
+想自己处理就套 `co2::asResult`。
+
+```cpp
+// 根上按值拿结果。asResult 把三种结果都装进 Result，所以 optional 总是有值。
+auto const outcome = co2::syncWait(co2::asResult(serve(socket)));
+if (outcome->hasError()) log(outcome->error().code());
+if (outcome->isStopped()) log("cancelled");
+```
+
+与开着异常时不同的地方：
+
+- **错误走到只能靠抛出来报告它的地方，是契约违规。** 这样的地方有三处：根
+  （`syncWait(task)` / `join()`）、没有 `return_error()` 的自定义 promise、没有转发
+  `await_completion()` 的包装 awaiter。在等待的地方套 `co2::asResult`，错误就是一个值。
+- **`co2::Error` 只装错误码。** `Error::exception()` 与 `Continuation::setException`
+  不存在，续体剩下值、错误码、已停止三个出口。
+- **promise 不需要 `unhandled_exception()`**，与原生编译器在 `-fno-exceptions` 下的
+  要求一致。`Generator` 体内不能等待，这种构建里它不会失败。
+- **`get_return_object_on_allocation_failure` 只在 promise 自己的 `operator new` 返回空
+  时生效。** allocator 与全局 `operator new` 以 `bad_alloc` 报告失败，没有异常时接不住，
+  后果由运行时决定（通常是终止）。
+
+**同一个程序的所有翻译单元必须用同一个异常开关编译。** 头文件里的内联函数在两种开关下
+是两份不同的定义，混用是静默的 ODR 违规。`CO2_HAS_EXCEPTIONS` 不能手动定义，定义了就
+是编译错误；MSVC 上另有一行 `#pragma detect_mismatch` 在链接期检查。
+
+GCC 与 Clang 上的这种构建由 CI 覆盖（见"构建与测试"）。MSVC 关掉异常的构建没有测试过。
 
 ## 执行层
 
@@ -348,7 +380,7 @@ CO2_END
 ```cpp
 done(args...);              // 有值：就地构造结果
 done.setError(code);        // 出错：一个 std::error_code
-done.setException(error);   // 出错：一个捕获的异常
+done.setException(error);   // 出错：一个捕获的异常（禁用异常的构建里没有）
 done.setStopped();          // 已停止：操作被取消了
 ```
 
@@ -435,6 +467,34 @@ v2 核心重写后，以下 v1 功能尚未在新模型上重建：事件 / 协�
 形态）、C++20 `std::coroutine_handle` 互操作层。它们将在标准销毁契约与 `stop_token`
 之上重新实现。（`whenAll` 与回调适配已经重建，见上。）
 
+## 升级说明
+
+三种完成方式改动了几处已有的接口与行为。从更早的 `0.3.0-pre` 快照升级时逐条对照：
+
+1. **`syncWait` / `join()` 返回 `co2::optional<T>`**，`void` 是
+   `co2::optional<co2::Unit>`，已停止为空。取值写 `*co2::syncWait(task)`。结果是 `bool`
+   的根要留意：`if (co2::syncWait(task))` 照样能编译，判断的却是"有没有值"。
+2. **`scheduleOn` 是取消点。** 轮询令牌之后正常返回的协程，收到停止请求之后会先在下一次
+   `scheduleOn` 结束，走不到自己的判断。要在停止之后继续换线程，写
+   `co2::unstoppable(co2::scheduleOn(s))`。
+3. **丢弃 `JoinHandle` 的 Task 会在下一个取消点被停掉。** 从前丢弃只是发出停止请求，
+   不轮询的 Task 照样跑完。要让它跑完，保留句柄，或者把 Task 里的 hop 用 `unstoppable`
+   包住。
+4. **`whenAll` 的子 Task 已停止，整个 `whenAll` 就是已停止**（有出错的则以第一个错误
+   完成）。从前只有失败影响结果。
+5. **根上抛出的异常。** 协程体里抛出的异常原样重抛，与从前一样；以错误码结束的 Task
+   抛的是 `std::system_error`。
+6. **一个 Task 的错误只能取走一次**，与值相同。同一个失败的 Task 等待两次，第二次是
+   契约违规；从前第二次会再抛一遍。
+7. **自定义 promise。** 子 Task 失败时，中间各层不再经历 `unhandled_exception()`；
+   promise 提供 `return_error()` 就按值收到错误，不提供则错误在体内重新抛出、照旧走
+   `unhandled_exception()`。提供了 `get_stop_token()` 的 promise 还要补上
+   `return_stopped()`，否则协程在取消点结束时是契约违规。
+8. **只转发标准三个成员的包装 awaiter。** 被包住的操作出错时行为不变
+   （`await_resume()` 照旧抛出）；以已停止完成则是契约违规，要给包装加上
+   `await_completion()` 的转发。
+9. **`Continuation::setException` 只在开着异常的构建里存在。**
+
 ## 性能基准
 
 `benchmarks/co2-benchmarks`，GCC 13.3 `-O2`（`cmake --preset release-bench`），
@@ -473,14 +533,20 @@ ctest --test-dir build --output-on-failure
 ```
 
 也可以使用仓库中的 CMake Preset（需要 CMake 3.21 与 Ninja）：`debug-gcc`、
-`debug-clang`、`asan`、`tsan`（构建与测试，例如 `cmake --preset debug-gcc &&
-cmake --build --preset debug-gcc && ctest --preset debug-gcc`）、`release-bench`
-（性能基准）。
+`debug-clang`、`asan`、`tsan`、`no-exceptions`（构建与测试，例如
+`cmake --preset debug-gcc && cmake --build --preset debug-gcc &&
+ctest --preset debug-gcc`）、`release-bench`（性能基准）。
 
 测试包括规范用例套件（对 [dcl.fct.def.coroutine] / [expr.await] / [coroutine.handle]
 逐条）、C++20 构建下与原生 `co_await` 的差分测试、一组通过契约处理器以退出码 86 结束
-的契约违规测试、以及必须编译失败的用例（挂起点写进 `switch`）。测试默认以 C++14
-构建，`-DCO2_TEST_CXX_STANDARD=20` 可以换成更新的标准；CI 覆盖 14 / 17 / 20 / 23。
+的契约违规测试、以及必须编译失败的用例（挂起点写进 `switch`、手动定义
+`CO2_HAS_EXCEPTIONS`……）。测试默认以 C++14 构建，`-DCO2_TEST_CXX_STANDARD=20` 可以换成
+更新的标准；CI 覆盖 14 / 17 / 20 / 23。
+
+`-DCO2_TEST_NO_EXCEPTIONS=ON`（或 `no-exceptions` 这个 Preset）给全部测试加上
+`-fno-exceptions -fno-rtti`：依赖 `throw` / `catch` 的用例不参加，差分测试不构建，另外
+多出三个"错误无处可抛"的契约违规测试。CI 在 GCC 与 Clang 上各以 Debug、Release 跑
+一遍。这个选项只为 GCC 与 Clang 准备。
 
 作为子项目使用时链接仅含头文件的 CMake target：
 

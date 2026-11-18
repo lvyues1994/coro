@@ -86,7 +86,8 @@ Allocator（只有带状态的 allocator 才在帧里留副本）
 `await_resume`。`CO2_YIELD(e)` ≡ `co_await promise.yield_value(e)`（不经过
 `await_transform`），`CO2_RETURN` ≡ `return_void`/`return_value` + `co_await
 final_suspend()`。异常离开协程体走标准的 `unhandled_exception` 路径；初始挂起点之前的
-异常销毁帧并抛给调用方。
+异常销毁帧并抛给调用方。禁用异常的构建里协程体变换没有 catch，promise 不需要
+`unhandled_exception()`（见"契约"一节的"禁用异常的构建"）。
 
 恢复点比标准多一步（`docs/design/completion-channels.md`）：awaiter 有可选成员
 `await_completion()` 时，先问它这次等待是有值、出错还是已停止。有值照常
@@ -115,7 +116,35 @@ promise 不受影响。
 
 前置条件与不变量违规经由 `CO2_CONTRACT_CHECK` 交给进程级处理器
 （`setContractViolationHandler`），默认 `std::terminate()`。热路径的内部断言在 `NDEBUG`
-下编译掉。运行时条件（Task 失败、取消……）以异常报告。
+下编译掉。运行时条件不是契约违规：Task 失败是一个按值传的 `Error`，取消是"已停止"，
+到了根上错误才变回异常。
+
+### 禁用异常的构建
+
+`config.hpp` 从编译器的开关得出 `CO2_HAS_EXCEPTIONS`（GCC / Clang 的 `__cpp_exceptions`
+与 `__EXCEPTIONS`，MSVC 的 `_CPPUNWIND`），不接受手动定义。值、错误码、已停止三条通道
+不随它变化；为 0 时库里不出现 `try` / `catch` / `throw`，少掉的只有与异常直接相关的
+几处：
+
+- `CoroutineFrame::step` 里包住协程体的 catch，以及各个 promise 的
+  `unhandled_exception()`。
+- `Error` 里装 `exception_ptr` 的那一半、`Error::exception()`、
+  `Continuation::setException`、`GeneratorPromise` 里存异常的成员。
+- 把异常接成错误的三处：`asResult` 对 `await_resume()` 的 catch、`Task` 取值时移动构造
+  的 catch、`Continuation::operator()` 构造结果时的 catch。
+- 靠接住 `bad_alloc` 触发 `get_return_object_on_allocation_failure` 的那条路；promise
+  的 `operator new` 返回空的那条路保留。
+
+`Error::raise()` 在这种构建里是契约违规。它只在错误无处可去时被调用：到了根
+（`syncWait` / `join`）、到了没有 `return_error()` 的 promise、或者经由一个只转发标准
+三个成员的包装 awaiter 的 `await_resume()`。
+
+初始化中途失败时的回滚（创建帧的三步、超对齐块的构造、线程池启动线程）不在上面的
+清单里：它们用局部的守卫对象而不是 `try` / `catch`，两种构建下是同一份代码。
+
+同一个程序的所有翻译单元必须用同一个异常开关编译：头文件里的内联函数在两种开关下是
+两份不同的定义。MSVC 上由 `#pragma detect_mismatch("co2_exceptions", …)` 在链接期
+检查，GCC 与 Clang 上没有检查手段。
 
 ## 返回类型
 
