@@ -276,7 +276,8 @@ void awaitCompletionIsAskedOnceBeforeAwaitResume() {
     CHECK(events == expected);
 }
 
-// 与异常逃出协程体时的顺序相同：awaiter → 局部 → promise 的入口 → final_suspend。
+// 与异常逃出协程体时的顺序相同：awaiter → 局部 → promise 的入口 → final_suspend。已停止
+// 与出错在库里是两段各自的代码，两条都要对。
 void aNonValueCompletionCleansUpInTheSameOrderAsAnException() {
     events.clear();
     auto destroyed = 0;
@@ -284,9 +285,18 @@ void aNonValueCompletionCleansUpInTheSameOrderAsAnException() {
         auto const coroutine = logsTheAwait(stopped(), destroyed);
         CHECK(coroutine.promise().outcome == Outcome::stopped);
     }
-    auto const expected = std::vector<std::string>{
+    auto const whenStopped = std::vector<std::string>{
         "await_completion", "~awaiter", "~local", "return_stopped", "final_suspend"};
-    CHECK(events == expected);
+    CHECK(events == whenStopped);
+
+    events.clear();
+    {
+        auto const coroutine = logsTheAwait(failed(), destroyed);
+        CHECK(coroutine.promise().outcome == Outcome::failed);
+    }
+    auto const whenFailed = std::vector<std::string>{
+        "await_completion", "~awaiter", "~local", "return_error", "final_suspend"};
+    CHECK(events == whenFailed);
 }
 
 // ---------------------------------------------------------------------------

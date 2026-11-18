@@ -199,46 +199,55 @@ template <class Promise, class Params, class Body> struct FrameCore {
         return false;
     }
 
+    // 收尾的顺序与异常逃出协程体时相同：awaiter → 局部 → promise 的入口 →
+    // final_suspend。前三步在 deliver… 里，各有"promise 有入口 / 没有入口"两个版本。
+    //
+    // 没有入口的版本不返回，所以声明成 [[noreturn]] void，而不是让一个"返回
+    // FrameHeader*"的函数带 [[noreturn]]：后一种写法 MSVC 报 C4646。
+    //
+    // 两条分支各自进入 final_suspend，没有合并成分支之后的一次调用。合并的写法试过：
+    // GCC -O2 为协程体生成的指令随之改变，基准的"对称转移"一项从 12.0 变成 12.6 纳秒；
+    // 分开写时，GCC 与 Clang 生成的指令都与拆出 deliver… 之前逐条相同。
     template <class Awaiter>
     bool finishUnlessValue(FrameHeader*& next, std::true_type) {
         Completion completion = awaiter<Awaiter>().await_completion();
         if (completion.isValue()) return false;
-        next = completion.isStopped()
-                   ? finishStopped<Awaiter>(typename HasReturnStopped<Promise>::type{})
-                   : finishFailed<Awaiter>(std::move(completion).error(),
-                                           typename HasReturnError<Promise>::type{});
+        if (completion.isStopped()) {
+            deliverStopped<Awaiter>(typename HasReturnStopped<Promise>::type{});
+            next = enterFinalSuspend();
+        } else {
+            deliverError<Awaiter>(std::move(completion).error(),
+                                  typename HasReturnError<Promise>::type{});
+            next = enterFinalSuspend();
+        }
         return true;
     }
 
-    // 收尾的顺序与异常逃出协程体时相同：awaiter → 局部 → promise 的入口 →
-    // final_suspend。
-    template <class Awaiter> FrameHeader* finishStopped(std::true_type) noexcept {
+    template <class Awaiter> void deliverStopped(std::true_type) noexcept {
         resetAwaiterAs<Awaiter>();
         destroyBody();
         promise().return_stopped();
-        return enterFinalSuspend();
     }
 
     // promise 没有 return_stopped()：已停止既不是值，也不是能抛进协程体的错误。
     template <class Awaiter>
-    [[noreturn]] FrameHeader* finishStopped(std::false_type) noexcept {
+    [[noreturn]] void deliverStopped(std::false_type) noexcept {
         CO2_CONTRACT_FAIL("a stopped completion reached a promise that has no "
                           "return_stopped()");
     }
 
     template <class Awaiter>
-    FrameHeader* finishFailed(Error&& error, std::true_type) noexcept {
+    void deliverError(Error&& error, std::true_type) noexcept {
         resetAwaiterAs<Awaiter>();
         destroyBody();
         promise().return_error(std::move(error));
-        return enterFinalSuspend();
     }
 
     // promise 没有 return_error()：在协程体内重新抛出，和 await_resume() 抛出一样落进
     // step 的 catch——awaiter 与局部由那里销毁，promise 收到 unhandled_exception()。为
     // 标准写的 promise 因此照常工作。
     template <class Awaiter>
-    [[noreturn]] FrameHeader* finishFailed(Error&& error, std::false_type) {
+    [[noreturn]] void deliverError(Error&& error, std::false_type) {
         error.raise();
     }
 
