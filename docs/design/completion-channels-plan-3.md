@@ -10,6 +10,10 @@
 
 设计稿：`docs/design/completion-channels.md`。本计划覆盖它第 10 节的第 9、10 步，也是最后两步。前两份计划：`docs/design/completion-channels-plan-1.md`、`docs/design/completion-channels-plan-2.md`。
 
+**状态：** 已执行完毕（2026-11-12），5 个任务对应提交 `2e6f1f4`、`05e1360`、`c3d3d6c`、`c380dd9`、`f16a09e`。每个任务都按这里的步骤做了，提交的代码和文档与本文逐字相同；任务 5 的 22 个配置与重复运行全部通过。CI 上的新作业还没有跑过（这些提交没有推送），MSVC 没有验证。执行时发现本文有一处写得不准：
+
+- 任务 3 步骤 1 说禁用异常的完整构建失败时"错误都在 `tests/` 下的源文件里"。实际有几条报在 `include/co2/error.hpp` 第 68 行（`enable_if` 里没有 `type`）。那是测试代码拿 `exception_ptr` 去构造 `Error` 引出的模板实例化错误，起因仍在测试源码里；库的头文件自己在这种构建下能编译，任务 2 步骤 4 验过。
+
 ## Global Constraints
 
 - 库与测试的最低语言标准是 C++14，不使用 C++17 及以后的特性。
