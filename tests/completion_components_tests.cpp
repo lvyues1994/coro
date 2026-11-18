@@ -73,7 +73,7 @@ void awaitingAFinishedHandleSeesHowTheTaskEnded() {
     // 等待者接住的异常。
     auto const failure = co2::syncWait(co2::asResult(awaitsAHandle(fails, reached)));
     CHECK(failure->hasError());
-    CHECK(failure->error().exception() == nullptr);
+    CHECK(not sample::carriesAnException(failure->error()));
     CHECK(failure->error().code() == sample::Errc::gone);
     CHECK(not reached);
 
@@ -152,7 +152,7 @@ void whenAllCompletesWithTheFirstErrorInTime() {
     CHECK(second.hasError() && second.error().code() == sample::Errc::gone);
 
     // 错误是按值传过来的：仍然是错误码，而不是被抛出又接住的异常。
-    CHECK(first.error().exception() == nullptr);
+    CHECK(not sample::carriesAnException(first.error()));
 }
 
 void whenAllCompletesStoppedWhenAChildStopsAndNoneFails() {
@@ -238,7 +238,7 @@ void whenAllOfAVectorFollowsTheSameRules() {
 
     auto const failure = outcomeOfAll(Leaf::stops, Leaf::fails, Leaf::returns);
     CHECK(failure.hasError());
-    CHECK(failure.error().exception() == nullptr);
+    CHECK(not sample::carriesAnException(failure.error()));
     CHECK(failure.error().code() == sample::Errc::gone);
 }
 
@@ -250,7 +250,9 @@ auto producesOneThen(Leaf leaf) CO2_BEG(co2::AsyncGenerator<int>, (leaf)) {
     CO2_YIELD(1);
     if (leaf == Leaf::fails) CO2_YIELD(co2::with_error(sample::Errc::gone));
     if (leaf == Leaf::stops) CO2_AWAIT(Ends{stopped()});
+#if CO2_HAS_EXCEPTIONS
     if (leaf == Leaf::throws) throw ExpectedError{};
+#endif
 }
 CO2_END
 
@@ -279,7 +281,7 @@ void aFailingProducerEndsItsConsumerTheSameWay() {
     auto const failure =
         co2::syncWait(co2::asResult(drains(Leaf::fails, seen, reachedTheEnd)));
     CHECK(failure->hasError());
-    CHECK(failure->error().exception() == nullptr); // 按值传过来的错误码
+    CHECK(not sample::carriesAnException(failure->error())); // 按值传过来的错误码
     CHECK(failure->error().code() == sample::Errc::gone);
     CHECK(seen == 1); // 出错之前的元素照常交付
     CHECK(not reachedTheEnd);
@@ -290,10 +292,12 @@ void aFailingProducerEndsItsConsumerTheSameWay() {
     CHECK(seen == 1);
     CHECK(not reachedTheEnd);
 
+#if CO2_HAS_EXCEPTIONS
     auto const thrown =
         co2::syncWait(co2::asResult(drains(Leaf::throws, seen, reachedTheEnd)));
     CHECK(thrown->hasError());
     CHECK(thrown->error().exception() != nullptr);
+#endif
 }
 
 // 返回 0：第二次 next() 有值；1：出错；2：已停止。
@@ -325,26 +329,40 @@ void theFailureIsDeliveredOnceAndThenTheStreamIsOver() {
 }
 
 // ---------------------------------------------------------------------------
-// fromCallback：续体的四个出口——值、错误码、异常、已停止
+// fromCallback：续体的四个出口——值、错误码、异常、已停止（禁用异常时没有异常那一个）
 
-enum class Exit { value, code, exception, stopped };
+enum class Exit {
+    value,
+    code,
+#if CO2_HAS_EXCEPTIONS
+    exception,
+#endif
+    stopped,
+};
+
+// 单独成一个函数：条件编译不能写在宏的实参里。
+void completes(co2::Continuation<int> done, Exit const how) {
+    if (how == Exit::value) done(5);
+    if (how == Exit::code) done.setError(sample::Errc::gone);
+#if CO2_HAS_EXCEPTIONS
+    if (how == Exit::exception)
+        done.setException(std::make_exception_ptr(ExpectedError{}));
+#endif
+    if (how == Exit::stopped) done.setStopped();
+}
 
 auto completesWith(Exit how, bool& reached)
     CO2_BEG(co2::Task<int>, (how, reached), int got{};) {
     CO2_AWAIT_AS_SET(got, co2::CallbackAwaitable<int>,
                      co2::fromCallback<int>([this](co2::Continuation<int> done) {
-                         if (how == Exit::value) done(5);
-                         if (how == Exit::code) done.setError(sample::Errc::gone);
-                         if (how == Exit::exception)
-                             done.setException(std::make_exception_ptr(ExpectedError{}));
-                         if (how == Exit::stopped) done.setStopped();
+                         completes(done, how);
                      }));
     reached = true;
     CO2_RETURN(got);
 }
 CO2_END
 
-void theContinuationHasFourExits() {
+void theContinuationHasEveryExit() {
     auto reached = false;
     CHECK(co2::syncWait(completesWith(Exit::value, reached)) == 5);
     CHECK(reached);
@@ -352,15 +370,17 @@ void theContinuationHasFourExits() {
     reached = false;
     auto const code = co2::syncWait(co2::asResult(completesWith(Exit::code, reached)));
     CHECK(code->hasError());
-    CHECK(code->error().exception() == nullptr); // 按值传过来的错误码
+    CHECK(not sample::carriesAnException(code->error())); // 按值传过来的错误码
     CHECK(code->error().code() == sample::Errc::gone);
     CHECK(not reached);
 
+#if CO2_HAS_EXCEPTIONS
     auto const exception =
         co2::syncWait(co2::asResult(completesWith(Exit::exception, reached)));
     CHECK(exception->hasError());
     CHECK(exception->error().exception() != nullptr);
     CHECK(not reached);
+#endif
 
     CHECK(co2::syncWait(co2::asResult(completesWith(Exit::stopped, reached)))
               ->isStopped());
@@ -393,6 +413,7 @@ void anApiThatFinishesLaterCanReportStopped() {
     CHECK(not reached);
 }
 
+#if CO2_HAS_EXCEPTIONS
 // 不认识 await_completion() 的调用方直接调用 await_resume()：错误码以异常的形式出现。
 void anErrorCodeFromACallbackRaisesForACallerThatSkipsAwaitCompletion() {
     auto awaitable = co2::fromCallback<int>(
@@ -406,6 +427,7 @@ void anErrorCodeFromACallbackRaisesForACallerThatSkipsAwaitCompletion() {
     }
     CHECK(sawCode);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // 已停止的产生方：just_stopped 与 stopIfRequested
@@ -540,7 +562,7 @@ void unstoppableStillForwardsHowTheOperationEnded() {
     reached = false;
     auto const failure = co2::syncWait(co2::asResult(shields(Leaf::fails, reached)));
     CHECK(failure->hasError());
-    CHECK(failure->error().exception() == nullptr);
+    CHECK(not sample::carriesAnException(failure->error()));
     CHECK(failure->error().code() == sample::Errc::gone);
 
     CHECK(co2::syncWait(co2::asResult(shields(Leaf::stops, reached)))->isStopped());
@@ -638,9 +660,11 @@ int main() {
     whenAllOfAVectorFollowsTheSameRules();
     aFailingProducerEndsItsConsumerTheSameWay();
     theFailureIsDeliveredOnceAndThenTheStreamIsOver();
-    theContinuationHasFourExits();
+    theContinuationHasEveryExit();
     anApiThatFinishesLaterCanReportStopped();
+#if CO2_HAS_EXCEPTIONS
     anErrorCodeFromACallbackRaisesForACallerThatSkipsAwaitCompletion();
+#endif
     justStoppedEndsTheTaskAsStopped();
     stopIfRequestedIsACancellationPoint();
     stopIfRequestedDoesNothingWithoutAToken();

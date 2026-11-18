@@ -206,6 +206,7 @@ void unstartedGeneratorReleasesItsParameters() {
     CHECK(counters.alive() == 0);
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto throwsBeforeFirstYield() CO2_BEG(co2::Generator<int>, ()) {
     throw ExpectedError{};
     CO2_YIELD(0);
@@ -243,6 +244,7 @@ void nestedGeneratorThrowingBeforeItsFirstYieldPropagates() {
     CHECK(thrown);
     CHECK(it == generator.end());
 }
+#endif
 
 auto stringsByConstRef(std::vector<std::string> const& items)
     CO2_BEG((co2::Generator<std::string const&, std::string>), (items),
@@ -523,8 +525,10 @@ int main() {
     macroArgumentsMayContainManyTopLevelCommas();
     largeAwaitersFallBackToTheHeapTransparently();
     unstartedGeneratorReleasesItsParameters();
+#if CO2_HAS_EXCEPTIONS
     generatorThrowingBeforeTheFirstYieldThrowsFromBegin();
     nestedGeneratorThrowingBeforeItsFirstYieldPropagates();
+#endif
     explicitValueTypeCopiesOnlyWhenTheConsumerAsks();
     constRvaluesYieldedByConstReferenceAreKeptAlive();
     asyncGeneratorConsumerFollowsTheProducerAcrossThreads();

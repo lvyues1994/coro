@@ -131,6 +131,7 @@ void scheduleOnMovesTheCoroutineToAWorkerThread() {
     CHECK(resumedOn != std::this_thread::get_id());
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto failsOnWorker(co2::ThreadPool& pool) CO2_BEG(co2::Task<int>, (pool)) {
     CO2_AWAIT(co2::scheduleOn(pool));
     throw ExpectedError{};
@@ -148,6 +149,7 @@ void exceptionsFromWorkersReachSyncWait() {
     }
     CHECK(thrown);
 }
+#endif
 
 void injectedWorkIsSpreadAcrossWorkers() {
     co2::ThreadPool pool{4U};
@@ -460,7 +462,9 @@ int main() {
     everyWorkerIsRecruitedForLocallyQueuedWork();
     aWorkerBlockedOnItsOwnQueuedWorkIsRescuedByAnother();
     scheduleOnMovesTheCoroutineToAWorkerThread();
+#if CO2_HAS_EXCEPTIONS
     exceptionsFromWorkersReachSyncWait();
+#endif
     injectedWorkIsSpreadAcrossWorkers();
     localWorkIsStolenByIdleWorkers();
     localQueueOverflowSpillsToTheGlobalQueue();

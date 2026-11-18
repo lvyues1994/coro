@@ -246,6 +246,7 @@ void childrenRunConcurrentlyOnAThreadPool() {
 // ---------------------------------------------------------------------------
 // 异常与停止传播
 
+#if CO2_HAS_EXCEPTIONS
 auto failsAfterGate(ManualEvent& gate, int which)
     CO2_BEG(co2::Task<int>, (gate, which)) {
     CO2_AWAIT(gate.wait());
@@ -298,6 +299,7 @@ void firstFailureInTimeIsRethrownAfterEveryChildFinishes() {
     whenAllTask = co2::Task<std::tuple<int, int, int>>{};
     CHECK(destroyed.load() == 1);
 }
+#endif
 
 auto observesStop(ManualEvent& gate, bool& sawStop)
     CO2_BEG(co2::Task<>, (gate, sawStop), co2::stop_token token;) {
@@ -346,10 +348,6 @@ struct CancellableApi {
     std::function<void(bool)> handler;
 };
 
-struct Cancelled : std::runtime_error {
-    Cancelled() : std::runtime_error{"cancelled"} {}
-};
-
 auto cancelsSynchronously(CancellableApi& api)
     CO2_BEG(co2::Task<int>, (api), int got{};) {
     CO2_AWAIT_AS_SET(
@@ -361,7 +359,7 @@ auto cancelsSynchronously(CancellableApi& api)
             api.handler = [done, guard](bool const cancelled) mutable {
                 guard.reset();
                 if (cancelled)
-                    done.setException(std::make_exception_ptr(Cancelled{}));
+                    done.setStopped();
                 else
                     done(1);
             };
@@ -393,15 +391,11 @@ void parentStopMayTearDownTheWhenAllFromInsideItsForwardingCallback() {
 
     CHECK(parent.request_stop());
     CHECK(co2::detail::TaskAccess::isDone(task));
-    bool thrown = false;
-    try {
-        co2::detail::TaskAccess::takeResult(task);
-    } catch (Cancelled const&) {
-        thrown = true;
-    }
-    CHECK(thrown);
+    // 两个 child 都以已停止完成，whenAll 与等待它的 Task 也就以已停止结束。
+    CHECK(co2::detail::TaskAccess::stateOf(task) == co2::detail::TaskState::stopped);
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto failsImmediately(int which) CO2_BEG(co2::Task<int>, (which)) {
     throw ExpectedError{which};
     CO2_RETURN(0);
@@ -446,6 +440,7 @@ void vectorFailureRethrowsTheFirstInTime() {
     }
     CHECK(thrown);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // 嵌套与规模
@@ -515,12 +510,16 @@ int main() {
     emptyVectorCompletesImmediately();
     childrenStartInOrderAndCompleteInAnyOrder();
     childrenRunConcurrentlyOnAThreadPool();
+#if CO2_HAS_EXCEPTIONS
     firstFailureInTimeIsRethrownAfterEveryChildFinishes();
+#endif
     parentStopRequestReachesEveryChild();
     alreadyStoppedParentStartsChildrenStopped();
     parentStopMayTearDownTheWhenAllFromInsideItsForwardingCallback();
+#if CO2_HAS_EXCEPTIONS
     synchronousFailureStillWaitsForSiblingsAndRethrows();
     vectorFailureRethrowsTheFirstInTime();
+#endif
     nestedWhenAllOverManyChildrenOnAPool();
     whenAllWorksInsideASpawnedTask();
     repeatedWhenAllDoesNotLeakOrCorrupt();

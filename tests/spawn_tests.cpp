@@ -103,6 +103,7 @@ void joinReturnsAnOptional() {
     CHECK(counter.load() == 1);
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto failing() CO2_BEG(co2::Task<int>, ()) {
     throw ExpectedError{};
     CO2_RETURN(0);
@@ -120,6 +121,7 @@ void joinRethrowsTheTaskException() {
     }
     CHECK(thrown);
 }
+#endif
 
 auto uniqueAnswer() CO2_BEG(co2::Task<std::unique_ptr<int>>, ()) {
     CO2_RETURN(std::unique_ptr<int>{new int{9}});
@@ -354,7 +356,9 @@ int main() {
     spawnOnAManualExecutorStartsWhenItRuns();
     spawnOnAThreadPoolJoinsFromTheCallingThread();
     joinReturnsAnOptional();
+#if CO2_HAS_EXCEPTIONS
     joinRethrowsTheTaskException();
+#endif
     joinMovesOutMoveOnlyResults();
     joinHandlesAreAwaitable();
     awaitingAnAlreadyCompletedHandleDoesNotSuspend();

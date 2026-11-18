@@ -95,11 +95,13 @@ auto nothing(int& counter) CO2_BEG(co2::Task<>, (counter)) {
 }
 CO2_END
 
+#if CO2_HAS_EXCEPTIONS
 auto failing() CO2_BEG(co2::Task<int>, ()) {
     throw ExpectedError{};
     CO2_RETURN(0);
 }
 CO2_END
+#endif
 
 void syncWaitRunsASynchronousTaskInline() {
     CHECK(co2::syncWait(answer(7)) == 7);
@@ -130,6 +132,7 @@ void syncWaitReturnsAnOptional() {
     CHECK(counter == 1);
 }
 
+#if CO2_HAS_EXCEPTIONS
 void syncWaitRethrowsTheTaskException() {
     bool thrown = false;
     try {
@@ -139,6 +142,7 @@ void syncWaitRethrowsTheTaskException() {
     }
     CHECK(thrown);
 }
+#endif
 
 auto uniqueAnswer() CO2_BEG(co2::Task<std::unique_ptr<int>>, ()) {
     CO2_RETURN(std::unique_ptr<int>{new int{3}});
@@ -172,6 +176,7 @@ void syncWaitWakesWhenTheTaskCompletesOnAnotherThread() {
     CHECK(resumedOn == driverId);
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto failsElsewhere(co2::ManualExecutor& executor) CO2_BEG(co2::Task<int>, (executor)) {
     CO2_AWAIT(co2::scheduleOn(executor));
     throw ExpectedError{};
@@ -194,6 +199,7 @@ void syncWaitRethrowsExceptionsFromAnotherThread() {
     driver.join();
     CHECK(thrown);
 }
+#endif
 
 } // namespace
 
@@ -202,9 +208,13 @@ int main() {
     manualExecutorIsFifoAndRunDrainsRescheduledWork();
     syncWaitRunsASynchronousTaskInline();
     syncWaitReturnsAnOptional();
+#if CO2_HAS_EXCEPTIONS
     syncWaitRethrowsTheTaskException();
+#endif
     syncWaitMovesOutMoveOnlyResults();
     syncWaitWakesWhenTheTaskCompletesOnAnotherThread();
+#if CO2_HAS_EXCEPTIONS
     syncWaitRethrowsExceptionsFromAnotherThread();
+#endif
     return 0;
 }

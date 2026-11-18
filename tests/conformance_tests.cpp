@@ -142,6 +142,7 @@ void returnVoidAndFallingOffTheEndBothCallReturnVoid() {
     }
 }
 
+#if CO2_HAS_EXCEPTIONS
 // ---------------------------------------------------------------------------
 // unhandled_exception
 
@@ -401,6 +402,35 @@ void initialAwaitResumeExceptionsReachUnhandledException() {
                       "final_suspend await_suspend");
     }
 }
+#else
+// ---------------------------------------------------------------------------
+// 禁用异常的构建：协程体变换里没有 catch，promise 不需要 unhandled_exception()——与原生
+// 编译器在 -fno-exceptions 下的要求一致。
+
+struct NoHandlerTask {
+    struct promise_type {
+        promise_type() = default; // 不拿协程的参数去初始化
+
+        NoHandlerTask get_return_object() noexcept { return {}; }
+        co2::suspend_never initial_suspend() noexcept { return {}; }
+        co2::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+    };
+};
+
+auto runsWithoutAHandler(int& ran) CO2_BEG(NoHandlerTask, (ran)) {
+    ++ran;
+    CO2_AWAIT(co2::suspend_never{});
+    ++ran;
+}
+CO2_END
+
+void aPromiseNeedsNoUnhandledExceptionWithoutExceptions() {
+    auto ran = 0;
+    runsWithoutAHandler(ran);
+    CHECK(ran == 2);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // [expr.await]：await_suspend 的三种返回类型
@@ -524,6 +554,7 @@ void noopCoroutineReturnsControlToTheResumer() {
     CHECK(task.done());
 }
 
+#if CO2_HAS_EXCEPTIONS
 // ---------------------------------------------------------------------------
 // awaiter 抛出：异常在 co_await 处抛出，落入协程体 → unhandled_exception
 
@@ -553,6 +584,7 @@ void awaiterExceptionsAreDeliveredIntoTheBody() {
         CHECK(task.promise().error != nullptr);
     }
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // await_transform 只作用于 co_await，不作用于 co_yield
@@ -1234,19 +1266,25 @@ int main() {
     lazyCoroutineFollowsTheStandardOrder();
     eagerCoroutineRunsInsideTheRamp();
     returnVoidAndFallingOffTheEndBothCallReturnVoid();
+#if CO2_HAS_EXCEPTIONS
     bodyExceptionsReachUnhandledException();
     localsAreDestroyedBeforeUnhandledException();
     rethrowingUnhandledExceptionLeavesTheCoroutineAtFinalSuspend();
     exceptionsBeforeTheInitialAwaitResumePropagateToTheCaller();
     aFrameThatFailsHalfwayThroughConstructionIsRolledBack();
     initialAwaitResumeExceptionsReachUnhandledException();
+#else
+    aPromiseNeedsNoUnhandledExceptionWithoutExceptions();
+#endif
     awaitSuspendReturningVoidSuspends();
     readyAwaiterNeverSuspends();
     awaitSuspendReturningFalseResumesImmediately();
     awaitSuspendReturningTrueSuspends();
     awaitSuspendReturningAHandleTransfersControl();
     noopCoroutineReturnsControlToTheResumer();
+#if CO2_HAS_EXCEPTIONS
     awaiterExceptionsAreDeliveredIntoTheBody();
+#endif
     awaitTransformAppliesToCoAwaitOnly();
     operatorCoAwaitIsLookedUpAsMemberThenAdl();
     lvalueAwaitersAreUsedInPlace();

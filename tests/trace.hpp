@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "co2/config.hpp" // CO2_HAS_EXCEPTIONS：抛出的那几个类型只在有异常时存在
+
 namespace trace {
 
 struct EventLog {
@@ -133,6 +135,7 @@ template <class Lib> struct Types {
         void await_resume() const { log->add("transfer await_resume"); }
     };
 
+#if CO2_HAS_EXCEPTIONS
     // 各阶段可抛出。
     struct Throwing {
         EventLog* log;
@@ -149,6 +152,7 @@ template <class Lib> struct Types {
             if (throwAt == 3) throw std::runtime_error{"await_resume"};
         }
     };
+#endif
 
     // 标准惯用法：借 await_suspend 拿到自己的 promise，返回 false 立即恢复。
     template <class Promise> struct GetPromise {
@@ -166,8 +170,10 @@ template <class Lib> struct Types {
     template <class Return> struct PromiseBase {
         EventLog* log{};
         bool lazy{true};
+#if CO2_HAS_EXCEPTIONS
         bool rethrowUnhandled{};
         std::exception_ptr error;
+#endif
 
         // 能用参数副本构造时标准要求传入全部参数副本（左值）；多余的参数忽略。
         template <class... Rest>
@@ -220,8 +226,10 @@ template <class Lib> struct Types {
 
         void unhandled_exception() {
             log->add("unhandled_exception");
+#if CO2_HAS_EXCEPTIONS
             error = std::current_exception();
             if (rethrowUnhandled) throw;
+#endif
         }
 
         // await_transform：把 int 变成立即就绪、返回该值两倍的 awaiter。
@@ -299,6 +307,7 @@ template <class Lib> struct Types {
         using Owner<VoidPromise>::Owner;
     };
 
+#if CO2_HAS_EXCEPTIONS
     // initial_suspend 的 awaiter 在 await_resume 里抛出。标准在求值 await-resume 之前就把
     // initial-await-resume-called 置真，所以这个异常进入 unhandled_exception，协程走到
     // final suspend，帧仍由拥有者销毁。
@@ -328,6 +337,7 @@ template <class Lib> struct Types {
         using promise_type = StartThrowsPromise;
         using Owner<StartThrowsPromise>::Owner;
     };
+#endif
 
     // final_suspend 不挂起：协程状态自动销毁，返回对象不拥有任何东西。
     struct FireAndForget {
@@ -413,12 +423,14 @@ typename Types<Lib>::VoidTask Types<Lib>::VoidPromise::get_return_object() {
     return VoidTask{Handle<VoidPromise>::from_promise(*this)};
 }
 
+#if CO2_HAS_EXCEPTIONS
 template <class Lib>
 typename Types<Lib>::StartThrowsTask
 Types<Lib>::StartThrowsPromise::get_return_object() {
     this->log->add("get_return_object");
     return StartThrowsTask{Handle<StartThrowsPromise>::from_promise(*this)};
 }
+#endif
 
 // 带 operator co_await 的 awaitable。C++14 下拼作 operator_co_await；C++20 构建再补上
 // 真正的 operator co_await（见各测试文件）。

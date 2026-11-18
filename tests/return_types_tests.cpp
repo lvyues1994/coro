@@ -141,6 +141,7 @@ void voidTaskFlowsOffTheEnd() {
     CHECK(counter == 2);
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto throwingLeaf() CO2_BEG(co2::Task<int>, ()) {
     throw ExpectedError{};
     CO2_RETURN(0);
@@ -171,6 +172,7 @@ void taskPropagatesExceptionsAndDestroysLocals() {
     }
     CHECK(thrown);
 }
+#endif
 
 auto chain(int depth) CO2_BEG(co2::Task<int>, (depth), int inner{};) {
     if (depth == 0) CO2_RETURN(0);
@@ -449,6 +451,7 @@ void lvalueGeneratorsAreTreatedAsRanges() {
     CHECK((seen == std::vector<int>{0, 1, 2}));
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto failingInner(Counters& counters)
     CO2_BEG(co2::Generator<int>, (counters),
             co2::detail::ResultStorage<Tracked> local;) {
@@ -490,6 +493,7 @@ void nestedExceptionsPropagateThroughTheParentToTheConsumer() {
     // 两层的局部都已随各自的协程体销毁；帧本身留到 generator 析构。
     CHECK(counters.alive() == 0);
 }
+#endif
 
 auto holdsLocal(Counters& counters, int depth)
     CO2_BEG(co2::Generator<int>, (counters, depth),
@@ -619,6 +623,7 @@ void asyncGeneratorSuspendsTheConsumerWhileTheProducerWaits() {
     CHECK(co2::detail::TaskAccess::takeResult(task) == 2);
 }
 
+#if CO2_HAS_EXCEPTIONS
 auto failingTicks(Counters& counters)
     CO2_BEG(co2::AsyncGenerator<int>, (counters),
             co2::detail::ResultStorage<Tracked> local;) {
@@ -657,6 +662,7 @@ void asyncGeneratorExceptionsReachTheConsumer() {
     CHECK(thrown);
     CHECK(counters.alive() == 0);
 }
+#endif
 
 auto trackedTicks(Counters& counters) CO2_BEG(co2::AsyncGenerator<int>, (counters),
                                               co2::detail::ResultStorage<Tracked> local;
@@ -693,7 +699,9 @@ void asyncGeneratorCanBeDestroyedBetweenElements() {
 int main() {
     taskIsLazyAndRunsChildrenInline();
     voidTaskFlowsOffTheEnd();
+#if CO2_HAS_EXCEPTIONS
     taskPropagatesExceptionsAndDestroysLocals();
+#endif
     deepAwaitChainDoesNotGrowTheNativeStack();
     awaitingAnLvalueTaskBorrowsIt();
     moveOnlyResultsAreMovedOut();
@@ -711,14 +719,18 @@ int main() {
     deepNestingDoesNotGrowTheNativeStackWhileIterating();
     elementsOfAcceptsArbitraryRanges();
     lvalueGeneratorsAreTreatedAsRanges();
+#if CO2_HAS_EXCEPTIONS
     nestedExceptionsPropagateThroughTheParentToTheConsumer();
+#endif
     destroyingAGeneratorMidIterationDestroysEveryActiveFrame();
     destroyingADeeplyNestedGeneratorMidIterationDoesNotRecurse();
     generatorsAreMovable();
 
     asyncGeneratorYieldsSynchronously();
     asyncGeneratorSuspendsTheConsumerWhileTheProducerWaits();
+#if CO2_HAS_EXCEPTIONS
     asyncGeneratorExceptionsReachTheConsumer();
+#endif
     asyncGeneratorCanBeDestroyedBetweenElements();
     return 0;
 }

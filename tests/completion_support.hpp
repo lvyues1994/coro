@@ -6,8 +6,10 @@
 #include <stdexcept>
 #include <vector>
 
+#include "co2/as_result.hpp"
 #include "co2/completion.hpp"
 #include "co2/coroutine.hpp"
+#include "co2/sync_wait.hpp"
 #include "co2/task.hpp"
 #include "sample_errc.hpp"
 
@@ -30,7 +32,25 @@ struct ExpectedError : std::runtime_error {
     ExpectedError() : std::runtime_error{"expected"} {}
 };
 
-enum class Leaf { returns, fails, stops, throws };
+// 禁用异常的构建里没有 throws：误用它的测试编不过，而不是悄悄跳过。
+enum class Leaf {
+    returns,
+    fails,
+    stops,
+#if CO2_HAS_EXCEPTIONS
+    throws,
+#endif
+};
+
+// 错误是按值传过来的错误码，还是途中抛出、被接住的异常？禁用异常的构建里只有前一种。
+inline bool carriesAnException(co2::Error const& error) noexcept {
+#if CO2_HAS_EXCEPTIONS
+    return error.exception() != nullptr;
+#else
+    static_cast<void>(error);
+    return false;
+#endif
+}
 
 // 记下每一层的局部是按什么顺序析构的。
 struct DepthGuard {
@@ -49,7 +69,9 @@ inline auto chain(int depth, Leaf leaf, int& resumed, std::vector<int>* order)
     guard.order = order;
     guard.depth = depth;
     if (depth == 0) {
+#if CO2_HAS_EXCEPTIONS
         if (leaf == Leaf::throws) throw ExpectedError{};
+#endif
         if (leaf == Leaf::fails) CO2_AWAIT(Ends{failed()});
         if (leaf == Leaf::stops) CO2_AWAIT(Ends{stopped()});
         CO2_RETURN(1);
@@ -59,5 +81,11 @@ inline auto chain(int depth, Leaf leaf, int& resumed, std::vector<int>* order)
     CO2_RETURN(value + 1);
 }
 CO2_END
+
+// 在根上按值看一个 Task 怎么结束的：错误不变成异常。两种构建都能用——禁用异常时让错误
+// 走到根上是契约违规，只能这样看。
+template <class T> co2::Result<T> outcomeOf(co2::Task<T> task) {
+    return std::move(*co2::syncWait(co2::asResult(std::move(task))));
+}
 
 } // namespace sample

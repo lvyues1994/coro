@@ -373,12 +373,16 @@ void spawnIsTwoAllocationsBeyondTheFrame() {
 // 超对齐的 awaiter 在堆上手工对齐：先要一整块，再在块里构造。reset() 归还那一块；构造
 // 抛出时那一块也必须归还，槽保持为空。异常类型是空的结构体：std::runtime_error 自己会
 // 分配，干扰计数。
+#if CO2_HAS_EXCEPTIONS
 struct ConstructionFailed {};
+#endif
 
 struct alignas(64) OverAlignedThrowsOnMove {
     explicit OverAlignedThrowsOnMove(bool const armed_) noexcept : armed{armed_} {}
     OverAlignedThrowsOnMove(OverAlignedThrowsOnMove&& other) : armed{other.armed} {
+#if CO2_HAS_EXCEPTIONS
         if (armed) throw ConstructionFailed{};
+#endif
     }
 
     bool armed;
@@ -399,6 +403,7 @@ void anOverAlignedAwaiterAlwaysReturnsItsBlock() {
     slot.reset();
     CHECK(deallocationsSoFar() - deallocationsBefore == 1);
 
+#if CO2_HAS_EXCEPTIONS
     // 构造抛出：那一块当场归还，槽保持为空。
     auto thrown = false;
     try {
@@ -410,6 +415,7 @@ void anOverAlignedAwaiterAlwaysReturnsItsBlock() {
     CHECK(not slot.hasValue());
     CHECK(allocationsSoFar() - allocationsBefore == 2);
     CHECK(deallocationsSoFar() - deallocationsBefore == 2);
+#endif
 }
 
 } // namespace
@@ -427,7 +433,11 @@ void* operator new(std::size_t const size) {
     allocations.fetch_add(1, std::memory_order_relaxed);
     allocatedBytes.fetch_add(static_cast<long>(size), std::memory_order_relaxed);
     if (auto* const pointer = std::malloc(size == 0U ? 1U : size)) return pointer;
+#if CO2_HAS_EXCEPTIONS
     throw std::bad_alloc{};
+#else
+    std::abort();
+#endif
 }
 
 void operator delete(void* const pointer) noexcept {

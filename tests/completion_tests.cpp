@@ -51,6 +51,7 @@ using sample::Ends;
 using sample::ExpectedError;
 using sample::failed;
 using sample::Leaf;
+using sample::outcomeOf;
 using sample::stopped;
 
 // ---------------------------------------------------------------------------
@@ -157,6 +158,7 @@ struct Recorder {
     co2::coroutine_handle<promise_type> handle;
 };
 
+#if CO2_HAS_EXCEPTIONS
 // 为标准写的 promise：没有这两个入口，只有 unhandled_exception()。
 struct Plain {
     struct promise_type {
@@ -188,6 +190,7 @@ struct Plain {
 
     co2::coroutine_handle<promise_type> handle;
 };
+#endif
 
 // final_suspend 不挂起：协程结束时帧自己销毁。
 int detachedStops = 0;
@@ -357,6 +360,7 @@ void aCoroutineThatDoesNotSuspendAtTheEndDestroysItself() {
     CHECK(destroyed == 1);
 }
 
+#if CO2_HAS_EXCEPTIONS
 // ---------------------------------------------------------------------------
 // promise 没有入口：错误在协程体内重新抛出，走 unhandled_exception()
 
@@ -402,6 +406,7 @@ void aCapturedExceptionReachesAStandardPromiseUnchanged() {
     }
     CHECK(sawOriginal);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Task：错误与已停止按值沿等待链向上传，只在根上变回异常或空的 optional
@@ -412,20 +417,31 @@ void valuesStillFlowThroughTheChain() {
     CHECK(resumed == 3);
 }
 
-void anErrorPassesThroughEveryLayerAndIsThrownAtTheRoot() {
+void anErrorPassesThroughEveryLayer() {
     auto resumed = 0;
     auto order = std::vector<int>{};
-    auto sawCode = false;
-    try {
-        co2::syncWait(chain(3, Leaf::fails, resumed, &order));
-    } catch (std::system_error const& exception) {
-        sawCode = exception.code() == sample::Errc::gone;
-    }
-    CHECK(sawCode);
+    auto const outcome = outcomeOf(chain(3, Leaf::fails, resumed, &order));
+    CHECK(outcome.hasError());
+    CHECK(outcome.error().code() == sample::Errc::gone);
+    CHECK(not sample::carriesAnException(outcome.error())); // 一路上没有抛过
     CHECK(resumed == 0); // 没有一层在等待之后继续执行
     auto const innerFirst = std::vector<int>{0, 1, 2, 3};
     CHECK(order == innerFirst); // 局部由内向外析构
 }
+
+#if CO2_HAS_EXCEPTIONS
+void theRootThrowsTheErrorAsSystemError() {
+    auto resumed = 0;
+    auto sawCode = false;
+    try {
+        co2::syncWait(chain(3, Leaf::fails, resumed, nullptr));
+    } catch (std::system_error const& exception) {
+        sawCode = exception.code() == sample::Errc::gone;
+    }
+    CHECK(sawCode);
+    CHECK(resumed == 0);
+}
+#endif
 
 void aStoppedTaskEndsEveryAwaiterAndTheRootReturnsEmpty() {
     auto resumed = 0;
@@ -437,6 +453,7 @@ void aStoppedTaskEndsEveryAwaiterAndTheRootReturnsEmpty() {
     CHECK(order == innerFirst);
 }
 
+#if CO2_HAS_EXCEPTIONS
 void anExceptionIsRethrownUnchangedAtTheRoot() {
     auto resumed = 0;
     auto sawOriginal = false;
@@ -448,17 +465,21 @@ void anExceptionIsRethrownUnchangedAtTheRoot() {
     CHECK(sawOriginal);
     CHECK(resumed == 0);
 }
+#endif
 
 void joinSeesTheSameThreeOutcomes() {
     co2::ManualExecutor executor;
     auto resumed = 0;
     auto value = co2::spawn(executor, chain(1, Leaf::returns, resumed, nullptr));
     auto stops = co2::spawn(executor, chain(1, Leaf::stops, resumed, nullptr));
-    auto fails = co2::spawn(executor, chain(1, Leaf::fails, resumed, nullptr));
-    CHECK(executor.run() == 3U);
+    CHECK(executor.run() == 2U);
 
     CHECK(value.join() == 2);
     CHECK(not stops.join().has_value());
+
+#if CO2_HAS_EXCEPTIONS
+    auto fails = co2::spawn(executor, chain(1, Leaf::fails, resumed, nullptr));
+    CHECK(executor.run() == 1U);
     auto sawCode = false;
     try {
         fails.join();
@@ -466,6 +487,7 @@ void joinSeesTheSameThreeOutcomes() {
         sawCode = exception.code() == sample::Errc::gone;
     }
     CHECK(sawCode);
+#endif
 }
 
 // 每一层都由恢复循环驱动：十万层的链上传播不长栈，析构也不递归。
@@ -474,13 +496,9 @@ void aDeepChainPropagatesWithoutGrowingTheStack() {
     auto resumed = 0;
     CHECK(not co2::syncWait(chain(depth, Leaf::stops, resumed, nullptr)).has_value());
 
-    auto sawCode = false;
-    try {
-        co2::syncWait(chain(depth, Leaf::fails, resumed, nullptr));
-    } catch (std::system_error const& exception) {
-        sawCode = exception.code() == sample::Errc::gone;
-    }
-    CHECK(sawCode);
+    auto const outcome = outcomeOf(chain(depth, Leaf::fails, resumed, nullptr));
+    CHECK(outcome.hasError());
+    CHECK(outcome.error().code() == sample::Errc::gone);
     CHECK(resumed == 0);
 }
 
@@ -527,11 +545,13 @@ auto awaitsThroughAWrapper(Leaf leaf, int& resumed)
 }
 CO2_END
 
-// 错误照旧能穿过旧式的调用方：await_resume() 把它抛出来。
-void anErrorStillCrossesAnAwaiterThatOnlyKnowsThreeMembers() {
+// 值照旧穿过旧式的调用方。错误也能：await_resume() 把它抛出来——没有异常时这一步是
+// 契约违规，见 no_exceptions_error_through_legacy_awaiter_contract_violation_test.cpp。
+void anAwaiterThatOnlyKnowsThreeMembersStillWorks() {
     auto resumed = 0;
     CHECK(co2::syncWait(awaitsThroughAWrapper(Leaf::returns, resumed)) == 11);
 
+#if CO2_HAS_EXCEPTIONS
     auto sawCode = false;
     try {
         co2::syncWait(awaitsThroughAWrapper(Leaf::fails, resumed));
@@ -547,6 +567,7 @@ void anErrorStillCrossesAnAwaiterThatOnlyKnowsThreeMembers() {
         sawOriginal = true;
     }
     CHECK(sawOriginal);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -566,19 +587,16 @@ auto failsWithWithError(bool& reached) CO2_BEG(co2::Task<int>, (reached)) {
 }
 CO2_END
 
-bool throwsRetryLater(co2::Task<int> task) {
-    try {
-        co2::syncWait(std::move(task));
-    } catch (std::system_error const& exception) {
-        return exception.code() == sample::Errc::retry_later;
-    }
-    return false;
+bool failsWithRetryLater(co2::Task<int> task) {
+    auto const outcome = outcomeOf(std::move(task));
+    return outcome.hasError() && outcome.error().code() == sample::Errc::retry_later &&
+           not sample::carriesAnException(outcome.error());
 }
 
 void justErrorAndWithErrorEndTheTaskWithThatError() {
     auto reached = false;
-    CHECK(throwsRetryLater(failsWithJustError(reached)));
-    CHECK(throwsRetryLater(failsWithWithError(reached)));
+    CHECK(failsWithRetryLater(failsWithJustError(reached)));
+    CHECK(failsWithRetryLater(failsWithWithError(reached)));
     CHECK(not reached);
 }
 
@@ -597,6 +615,7 @@ void justErrorWorksInAnyPromiseThatHasTheEntry() {
     CHECK(not reached);
 }
 
+#if CO2_HAS_EXCEPTIONS
 // 不认识 await_completion() 的调用方直接调用 await_resume()：错误以异常的形式出现。
 void justErrorRaisesForACallerThatSkipsAwaitCompletion() {
     auto const awaiter = co2::just_error(sample::Errc::gone);
@@ -608,6 +627,7 @@ void justErrorRaisesForACallerThatSkipsAwaitCompletion() {
     }
     CHECK(sawCode);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // asResult：三种结果都变成值，当前协程照常往下执行
@@ -618,7 +638,7 @@ auto classifies(Leaf leaf, int& resumed)
     CO2_AWAIT_SET(result, co2::asResult(chain(1, leaf, resumed, nullptr)));
     if (result->isStopped()) CO2_RETURN(2);
     if (result->hasValue()) CO2_RETURN(result->value() == 2 ? 0 : -1);
-    if (result->error().exception() != nullptr) CO2_RETURN(3);
+    if (sample::carriesAnException(result->error())) CO2_RETURN(3);
     CO2_RETURN(result->error().code() == sample::Errc::gone ? 1 : -1);
 }
 CO2_END
@@ -628,7 +648,9 @@ void asResultTurnsEveryCompletionIntoAValue() {
     CHECK(co2::syncWait(classifies(Leaf::returns, resumed)) == 0);
     CHECK(co2::syncWait(classifies(Leaf::fails, resumed)) == 1);
     CHECK(co2::syncWait(classifies(Leaf::stops, resumed)) == 2);
+#if CO2_HAS_EXCEPTIONS
     CHECK(co2::syncWait(classifies(Leaf::throws, resumed)) == 3);
+#endif
 }
 
 // 标准写法的 awaiter：没有 await_completion()。
@@ -638,11 +660,13 @@ struct Seven {
     int await_resume() const noexcept { return 7; }
 };
 
+#if CO2_HAS_EXCEPTIONS
 struct Throws {
     bool await_ready() const noexcept { return true; }
     void await_suspend(co2::coroutine_handle<>) const noexcept {}
     int await_resume() const { throw ExpectedError{}; }
 };
+#endif
 
 auto wrapsPlainAwaiters(int& sum, bool& caught, bool& voidHasValue)
     CO2_BEG(co2::Task<>, (sum, caught, voidHasValue),
@@ -652,8 +676,10 @@ auto wrapsPlainAwaiters(int& sum, bool& caught, bool& voidHasValue)
     sum += number->value();
     CO2_AWAIT_SET(number, co2::asResult(lvalue)); // 左值：只记引用
     sum += number->value();
+#if CO2_HAS_EXCEPTIONS
     CO2_AWAIT_SET(number, co2::asResult(Throws{})); // await_resume() 的异常被接成错误
     caught = number->hasError() && number->error().exception() != nullptr;
+#endif
     CO2_AWAIT_SET(nothing, co2::asResult(co2::suspend_never{})); // 结果是 void
     voidHasValue = nothing->hasValue();
 }
@@ -665,7 +691,9 @@ void asResultWrapsAnyAwaitable() {
     auto voidHasValue = false;
     CHECK(co2::syncWait(wrapsPlainAwaiters(sum, caught, voidHasValue)).has_value());
     CHECK(sum == 14);
+#if CO2_HAS_EXCEPTIONS
     CHECK(caught);
+#endif
     CHECK(voidHasValue);
 }
 
@@ -701,11 +729,13 @@ void syncWaitOfAsResultHandsTheOutcomeToOrdinaryCode() {
         co2::syncWait(co2::asResult(chain(1, Leaf::stops, resumed, nullptr)));
     CHECK(stop.has_value() && stop->isStopped());
 
+#if CO2_HAS_EXCEPTIONS
     auto const thrown =
         co2::syncWait(co2::asResult(chain(1, Leaf::throws, resumed, nullptr)));
     CHECK(thrown.has_value() && thrown->hasError());
     CHECK(thrown->error().exception() != nullptr);
     CHECK(thrown->error().code() == co2::Errc::unhandled_exception);
+#endif
 
     CHECK(co2::syncWait(co2::asResult(voidLeaf(Leaf::returns)))->hasValue());
     CHECK(co2::syncWait(co2::asResult(voidLeaf(Leaf::stops)))->isStopped());
@@ -727,19 +757,26 @@ int main() {
     aYieldIsAResumePointToo();
     anLvalueAwaiterIsAskedInPlace();
     aCoroutineThatDoesNotSuspendAtTheEndDestroysItself();
+#if CO2_HAS_EXCEPTIONS
     anErrorCodeReachesAStandardPromiseAsSystemError();
     aCapturedExceptionReachesAStandardPromiseUnchanged();
+#endif
     valuesStillFlowThroughTheChain();
-    anErrorPassesThroughEveryLayerAndIsThrownAtTheRoot();
+    anErrorPassesThroughEveryLayer();
     aStoppedTaskEndsEveryAwaiterAndTheRootReturnsEmpty();
+#if CO2_HAS_EXCEPTIONS
+    theRootThrowsTheErrorAsSystemError();
     anExceptionIsRethrownUnchangedAtTheRoot();
+#endif
     joinSeesTheSameThreeOutcomes();
     aDeepChainPropagatesWithoutGrowingTheStack();
     anLvalueTaskPropagatesTheSameWay();
-    anErrorStillCrossesAnAwaiterThatOnlyKnowsThreeMembers();
+    anAwaiterThatOnlyKnowsThreeMembersStillWorks();
     justErrorAndWithErrorEndTheTaskWithThatError();
     justErrorWorksInAnyPromiseThatHasTheEntry();
+#if CO2_HAS_EXCEPTIONS
     justErrorRaisesForACallerThatSkipsAwaitCompletion();
+#endif
     asResultTurnsEveryCompletionIntoAValue();
     asResultWrapsAnyAwaitable();
     syncWaitOfAsResultHandsTheOutcomeToOrdinaryCode();

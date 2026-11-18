@@ -177,6 +177,19 @@ static_assert(not std::is_convertible<int, co2::Error>::value,
 static_assert(not std::is_convertible<std::exception_ptr, co2::Error>::value,
               "capturing an exception as co2::Error must be explicit");
 
+// 装异常的那一半只在有异常的构建里存在（config.hpp 的 CO2_HAS_EXCEPTIONS）。
+template <class E, class = void> struct HasExceptionAccessor : std::false_type {};
+template <class E>
+struct HasExceptionAccessor<
+    E, decltype(static_cast<void>(std::declval<E const&>().exception()))>
+    : std::true_type {};
+
+static_assert(HasExceptionAccessor<co2::Error>::value == (CO2_HAS_EXCEPTIONS != 0),
+              "Error::exception() exists exactly when the build has exceptions");
+static_assert(std::is_constructible<co2::Error, std::exception_ptr>::value ==
+                  (CO2_HAS_EXCEPTIONS != 0),
+              "an Error captures an exception exactly when the build has exceptions");
+
 bool acceptsError(co2::Error const& error, std::error_code const expected) {
     return error.code() == expected;
 }
@@ -184,7 +197,9 @@ bool acceptsError(co2::Error const& error, std::error_code const expected) {
 void anErrorHoldsACode() {
     co2::Error const error = std::make_error_code(std::errc::timed_out);
     CHECK(error.code() == std::errc::timed_out);
+#if CO2_HAS_EXCEPTIONS
     CHECK(error.exception() == nullptr);
+#endif
 }
 
 void anErrorConvertsFromAnErrorCodeEnum() {
@@ -194,6 +209,25 @@ void anErrorConvertsFromAnErrorCodeEnum() {
     CHECK(acceptsError(sample::Errc::gone, sample::Errc::gone));
 }
 
+void errorCodesCopyMoveAndAssign() {
+    co2::Error first = sample::Errc::retry_later;
+    co2::Error second = sample::Errc::gone;
+
+    auto copy = first;
+    CHECK(copy.code() == sample::Errc::retry_later);
+    CHECK(first.code() == sample::Errc::retry_later);
+
+    auto moved = std::move(copy);
+    CHECK(moved.code() == sample::Errc::retry_later);
+
+    moved = second;
+    CHECK(moved.code() == sample::Errc::gone);
+
+    second = std::move(first);
+    CHECK(second.code() == sample::Errc::retry_later);
+}
+
+#if CO2_HAS_EXCEPTIONS
 void anErrorHoldsAnException() {
     auto const error = co2::Error{std::make_exception_ptr(std::runtime_error{"boom"})};
     CHECK(error.code() == co2::Errc::unhandled_exception);
@@ -242,6 +276,7 @@ void errorsCopyMoveAndAssignAcrossBothKinds() {
     code = exception;
     CHECK(code.exception() == exception.exception());
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Completion
@@ -359,9 +394,12 @@ int main() {
     optionalsOrderLikeStdOptional();
     anErrorHoldsACode();
     anErrorConvertsFromAnErrorCodeEnum();
+    errorCodesCopyMoveAndAssign();
+#if CO2_HAS_EXCEPTIONS
     anErrorHoldsAnException();
     raiseRethrowsTheOriginalExceptionOrThrowsSystemError();
     errorsCopyMoveAndAssignAcrossBothKinds();
+#endif
     aCompletionIsExactlyOneOfThreeKinds();
     aResultIsAValueAnErrorOrStopped();
     aResultOwnsExactlyOneValue();

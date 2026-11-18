@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -43,9 +44,16 @@ struct ExpectedError : std::runtime_error {
     ExpectedError() : std::runtime_error{"expected"} {}
 };
 
-struct Cancelled : std::runtime_error {
-    Cancelled() : std::runtime_error{"cancelled"} {}
-};
+// 续体的异常出口只在有异常的构建里存在；值、错误码、已停止三个出口两种构建都有。
+template <class C, class = void> struct HasSetException : std::false_type {};
+template <class C>
+struct HasSetException<C, decltype(static_cast<void>(std::declval<C&>().setException(
+                              std::declval<std::exception_ptr>())))>
+    : std::true_type {};
+
+static_assert(HasSetException<co2::Continuation<int>>::value ==
+                  (CO2_HAS_EXCEPTIONS != 0),
+              "Continuation::setException exists exactly when the build has exceptions");
 
 // 模拟的回调式 API：把 handler 存起来，由测试代码在任意线程上触发；支持 cancel。
 struct FakeApi {
@@ -231,6 +239,7 @@ void completionRacingWithSuspensionIsResolvedEitherWay() {
 // ---------------------------------------------------------------------------
 // 异常两条通道
 
+#if CO2_HAS_EXCEPTIONS
 auto initiateThrows() CO2_BEG(co2::Task<int>, (), int got{};) {
     CO2_AWAIT_AS_SET(
         got, co2::CallbackAwaitable<int>,
@@ -310,6 +319,7 @@ void throwingResultConstructorCompletesTheAwaitWithTheException() {
     }
     CHECK(thrown);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // 结果的生命周期：awaiter 里的 T 没有自己的 engaged 标志，"有没有对象"记在原子状态字
@@ -318,7 +328,9 @@ void throwingResultConstructorCompletesTheAwaitWithTheException() {
 struct Tracked {
     static std::atomic<int> live;
     static std::atomic<int> constructed;
+#if CO2_HAS_EXCEPTIONS
     static bool throwOnMove; // 只在单线程用例里改动
+#endif
 
     explicit Tracked(int const payload_) : payload{payload_} {
         ++live;
@@ -326,7 +338,9 @@ struct Tracked {
     }
 
     Tracked(Tracked&& other) : payload{other.payload} {
+#if CO2_HAS_EXCEPTIONS
         if (throwOnMove) throw ExpectedError{};
+#endif
         ++live;
         ++constructed;
     }
@@ -342,7 +356,9 @@ struct Tracked {
 
 std::atomic<int> Tracked::live{0};
 std::atomic<int> Tracked::constructed{0};
+#if CO2_HAS_EXCEPTIONS
 bool Tracked::throwOnMove = false;
+#endif
 
 auto trackedSynchronously(int v)
     CO2_BEG(co2::Task<int>, (v), co2::detail::ResultStorage<Tracked> got;) {
@@ -382,6 +398,7 @@ void resultIsConstructedOnceAndDestroyedOnce() {
     }
 }
 
+#if CO2_HAS_EXCEPTIONS
 // await_resume 移出结果时移动构造抛出：异常进入协程体，留在 awaiter 里的那一份由
 // awaiter 的析构函数清理，不重复析构。
 struct ThrowOnMoveScope {
@@ -414,6 +431,7 @@ auto voidCompletesWithException() CO2_BEG(co2::Task<>, ()) {
     CO2_RETURN();
 }
 CO2_END
+#endif
 
 auto voidCompletesFromAnotherThread(std::vector<std::thread>& threads, int& hits)
     CO2_BEG(co2::Task<>, (threads, hits)) {
@@ -427,6 +445,7 @@ auto voidCompletesFromAnotherThread(std::vector<std::thread>& threads, int& hits
 CO2_END
 
 void voidResultsTakeBothChannels() {
+#if CO2_HAS_EXCEPTIONS
     bool thrown = false;
     try {
         co2::syncWait(voidCompletesWithException());
@@ -434,6 +453,7 @@ void voidResultsTakeBothChannels() {
         thrown = true;
     }
     CHECK(thrown);
+#endif
 
     int hits = 0;
     for (int round = 0; round < 200; ++round) {
@@ -461,7 +481,7 @@ auto cancellable(FakeApi& api, co2::ThreadPool& pool)
             api.asyncGetWithCancel([done, guard](bool cancelled, int value) mutable {
                 guard.reset();
                 if (cancelled)
-                    done.setException(std::make_exception_ptr(Cancelled{}));
+                    done.setStopped();
                 else
                     done(value);
             });
@@ -477,15 +497,9 @@ void stopRequestReachesTheApiThroughTheInitiateToken() {
     while (not api.hasPending())
         std::this_thread::yield();
     CHECK(not handle.isReady());
-    CHECK(
-        handle.requestStop()); // → stop_callback → api.cancel() → 续体以 Cancelled 完成
-    bool thrown = false;
-    try {
-        handle.join();
-    } catch (Cancelled const&) {
-        thrown = true;
-    }
-    CHECK(thrown);
+    // → stop_callback → api.cancel() → API 以"已取消"回调 → 续体 setStopped()
+    CHECK(handle.requestStop());
+    CHECK(not handle.join().has_value());
 }
 
 void normalCompletionWinsWhenNoStopIsRequested() {
@@ -622,11 +636,15 @@ int main() {
     asynchronousCompletionResumesOnTheCallbackThread();
     syncWaitWakesFromACallbackThread();
     completionRacingWithSuspensionIsResolvedEitherWay();
+#if CO2_HAS_EXCEPTIONS
     exceptionsFromInitiateAreDeliveredIntoTheCoroutine();
     setExceptionIsRethrownByAwaitResume();
     throwingResultConstructorCompletesTheAwaitWithTheException();
+#endif
     resultIsConstructedOnceAndDestroyedOnce();
+#if CO2_HAS_EXCEPTIONS
     throwingMoveOutOfTheAwaiterIsCleanedUpExactlyOnce();
+#endif
     voidResultsTakeBothChannels();
     stopRequestReachesTheApiThroughTheInitiateToken();
     normalCompletionWinsWhenNoStopIsRequested();
