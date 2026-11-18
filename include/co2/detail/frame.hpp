@@ -499,29 +499,27 @@ struct CoroutineFrame
         frame->core.suspendPoint = SuspendPoint{};
         frame->core.bodyAlive = false;
 
-        try {
-            makeParams(static_cast<void*>(frame->core.paramsStorage));
-        } catch (...) {
-            release(frame);
-            throw;
-        }
-        try {
-            constructPromiseFor<Promise>(frame->core.params(),
-                                         frame->core.prefix.promise, 0);
-        } catch (...) {
-            frame->core.params().~Params();
-            release(frame);
-            throw;
-        }
-        try {
-            ::new (static_cast<void*>(frame->core.bodyStorage))
-                Body(frame->core.params());
-        } catch (...) {
-            frame->core.promise().~Promise();
-            frame->core.params().~Params();
-            release(frame);
-            throw;
-        }
+        // 三步构造中的任何一步抛出：按相反的顺序撤销已经完成的部分，释放帧，异常继续
+        // 向外。用守卫而不是 try / catch：同一份代码在禁用异常的构建里也能编译。
+        struct Rollback {
+            CoroutineFrame* frame;
+            bool paramsBuilt;
+            bool promiseBuilt;
+            ~Rollback() {
+                if (frame == nullptr) return;
+                if (promiseBuilt) frame->core.promise().~Promise();
+                if (paramsBuilt) frame->core.params().~Params();
+                release(frame);
+            }
+        } rollback{frame, false, false};
+
+        makeParams(static_cast<void*>(frame->core.paramsStorage));
+        rollback.paramsBuilt = true;
+        constructPromiseFor<Promise>(frame->core.params(), frame->core.prefix.promise, 0);
+        rollback.promiseBuilt = true;
+        ::new (static_cast<void*>(frame->core.bodyStorage)) Body(frame->core.params());
+        rollback.frame = nullptr;
+
         frame->core.bodyAlive = true;
         return frame;
     }

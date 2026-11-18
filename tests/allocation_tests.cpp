@@ -50,8 +50,13 @@ namespace {
 
 std::atomic<long> allocations{0};
 std::atomic<long> allocatedBytes{0};
+std::atomic<long> deallocations{0};
 
 long allocationsSoFar() noexcept { return allocations.load(std::memory_order_relaxed); }
+
+long deallocationsSoFar() noexcept {
+    return deallocations.load(std::memory_order_relaxed);
+}
 
 long bytesSoFar() noexcept { return allocatedBytes.load(std::memory_order_relaxed); }
 
@@ -365,6 +370,48 @@ void spawnIsTwoAllocationsBeyondTheFrame() {
     });
 }
 
+// 超对齐的 awaiter 在堆上手工对齐：先要一整块，再在块里构造。reset() 归还那一块；构造
+// 抛出时那一块也必须归还，槽保持为空。异常类型是空的结构体：std::runtime_error 自己会
+// 分配，干扰计数。
+struct ConstructionFailed {};
+
+struct alignas(64) OverAlignedThrowsOnMove {
+    explicit OverAlignedThrowsOnMove(bool const armed_) noexcept : armed{armed_} {}
+    OverAlignedThrowsOnMove(OverAlignedThrowsOnMove&& other) : armed{other.armed} {
+        if (armed) throw ConstructionFailed{};
+    }
+
+    bool armed;
+};
+
+void anOverAlignedAwaiterAlwaysReturnsItsBlock() {
+    static_assert(not co2::detail::AwaitSlot<>::isInline<OverAlignedThrowsOnMove>(),
+                  "over-aligned awaiters never stay inline");
+    co2::detail::AwaitSlot<> slot;
+    auto const allocationsBefore = allocationsSoFar();
+    auto const deallocationsBefore = deallocationsSoFar();
+
+    // 构造成功：那一块留在槽里，reset() 归还。
+    slot.emplace<OverAlignedThrowsOnMove>(OverAlignedThrowsOnMove{false});
+    CHECK(slot.hasValue());
+    CHECK(allocationsSoFar() - allocationsBefore == 1);
+    CHECK(deallocationsSoFar() - deallocationsBefore == 0);
+    slot.reset();
+    CHECK(deallocationsSoFar() - deallocationsBefore == 1);
+
+    // 构造抛出：那一块当场归还，槽保持为空。
+    auto thrown = false;
+    try {
+        slot.emplace<OverAlignedThrowsOnMove>(OverAlignedThrowsOnMove{true});
+    } catch (ConstructionFailed const&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+    CHECK(not slot.hasValue());
+    CHECK(allocationsSoFar() - allocationsBefore == 2);
+    CHECK(deallocationsSoFar() - deallocationsBefore == 2);
+}
+
 } // namespace
 
 // 计数的全局 operator new/delete。
@@ -383,8 +430,15 @@ void* operator new(std::size_t const size) {
     throw std::bad_alloc{};
 }
 
-void operator delete(void* const pointer) noexcept { std::free(pointer); }
-void operator delete(void* const pointer, std::size_t) noexcept { std::free(pointer); }
+void operator delete(void* const pointer) noexcept {
+    if (pointer != nullptr) deallocations.fetch_add(1, std::memory_order_relaxed);
+    std::free(pointer);
+}
+
+void operator delete(void* const pointer, std::size_t) noexcept {
+    if (pointer != nullptr) deallocations.fetch_add(1, std::memory_order_relaxed);
+    std::free(pointer);
+}
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
@@ -414,6 +468,7 @@ int main() {
     oversizedCallbackAwaiterFallsBackToOneHeapAllocation();
     callbackAwaiterKeepsAThreePointerClosureInline();
     framesCarryNoUnusedFixedOverhead();
+    anOverAlignedAwaiterAlwaysReturnsItsBlock();
     spawnIsTwoAllocationsBeyondTheFrame();
     return 0;
 }

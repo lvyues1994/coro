@@ -69,13 +69,18 @@ template <class T> struct HeapObject {
     template <class Value> static T* createImpl(Value&& value, std::true_type) {
         void* const block =
             ::operator new(overAlignedBlockSize(sizeof(T), alignof(T)));
-        try {
-            return ::new (placeOverAligned(block, sizeof(T), alignof(T)))
-                T(std::forward<Value>(value));
-        } catch (...) {
-            ::operator delete(block);
-            throw;
-        }
+        // T 的构造抛出时归还整块。用守卫而不是 try / catch：同一份代码在禁用异常的
+        // 构建里也能编译。
+        struct ReleaseOnFailure {
+            void* block;
+            ~ReleaseOnFailure() {
+                if (block != nullptr) ::operator delete(block);
+            }
+        } guard{block};
+        auto* const object = ::new (placeOverAligned(block, sizeof(T), alignof(T)))
+            T(std::forward<Value>(value));
+        guard.block = nullptr;
+        return object;
     }
 
     static void destroyImpl(T* const object, std::false_type) noexcept {

@@ -205,16 +205,21 @@ struct ThreadPool final : Scheduler {
         for (auto index = 0U; index != threadCount; ++index)
             workers.push_back(
                 std::unique_ptr<Worker>{new Worker{*this, index, threadCount}});
-        try {
-            for (auto& worker : workers) {
-                auto* const target = worker.get();
-                target->thread = std::thread{[this, target] { workerMain(*target); }};
+        // 线程起到一半失败（std::thread 的构造抛出）：停下并回收已经起来的线程，异常
+        // 继续向外。用守卫而不是 try / catch：同一份代码在禁用异常的构建里也能编译。
+        struct StopOnFailure {
+            ThreadPool* pool;
+            ~StopOnFailure() {
+                if (pool == nullptr) return;
+                pool->requestStop();
+                pool->joinWorkers();
             }
-        } catch (...) {
-            requestStop();
-            joinWorkers();
-            throw;
+        } guard{this};
+        for (auto& worker : workers) {
+            auto* const target = worker.get();
+            target->thread = std::thread{[this, target] { workerMain(*target); }};
         }
+        guard.pool = nullptr;
     }
 
     ~ThreadPool() override {

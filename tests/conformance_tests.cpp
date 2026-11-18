@@ -256,6 +256,113 @@ void exceptionsBeforeTheInitialAwaitResumePropagateToTheCaller() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 帧的三步构造（参数副本 → promise → 局部）里任何一步抛出：已经构造好的部分按相反的
+// 顺序析构，帧被释放，异常抛给调用方，协程体从未执行。
+
+int liveFrames = 0;
+
+// 移进帧时可以抛出的参数。
+struct ThrowsOnMove {
+    explicit ThrowsOnMove(bool const armed_) noexcept : armed{armed_} {}
+    ThrowsOnMove(ThrowsOnMove&& other) : armed{other.armed} {
+        if (armed) throw std::runtime_error{"parameter copy"};
+    }
+
+    bool armed;
+};
+
+// 帧创建时默认构造、可以抛出的局部。
+bool localsThrow = false;
+
+struct ThrowsOnConstruction {
+    ThrowsOnConstruction() {
+        if (localsThrow) throw std::runtime_error{"local"};
+    }
+};
+
+// promise 用自己的 operator new / delete 统计存活的帧。
+struct CountedFrameTask {
+    struct promise_type {
+        promise_type(EventLog& log_, bool const throws, Tracked&, ThrowsOnMove&)
+            : log{&log_} {
+            if (throws) throw std::runtime_error{"promise"};
+            log->add("promise constructed");
+        }
+        ~promise_type() { log->add("promise destroyed"); }
+
+        static void* operator new(std::size_t const size) {
+            ++liveFrames;
+            return ::operator new(size);
+        }
+        static void operator delete(void* const pointer) noexcept {
+            --liveFrames;
+            ::operator delete(pointer);
+        }
+
+        CountedFrameTask get_return_object() noexcept { return {}; }
+        co2::suspend_never initial_suspend() noexcept { return {}; }
+        co2::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() { log->add("unhandled_exception"); }
+
+        EventLog* log;
+    };
+};
+
+auto buildsAFrame(EventLog& log, bool promiseThrows, Tracked first, ThrowsOnMove second)
+    CO2_BEG(CountedFrameTask, (log, promiseThrows, first, second),
+            ThrowsOnConstruction local;) {
+    log.add("body");
+}
+CO2_END
+
+bool throwsWhileBuildingAFrame(EventLog& log, bool const promiseThrows,
+                               bool const parameterThrows) {
+    try {
+        buildsAFrame(log, promiseThrows, Tracked{log, "first"},
+                     ThrowsOnMove{parameterThrows});
+    } catch (std::runtime_error const&) {
+        return true;
+    }
+    return false;
+}
+
+void aFrameThatFailsHalfwayThroughConstructionIsRolledBack() {
+    {
+        // 第二个参数移进帧时抛出：第一个参数副本已经构造好，要析构。
+        EventLog log;
+        CHECK(throwsWhileBuildingAFrame(log, false, true));
+        EXPECT_EVENTS(log, "first constructed", "first destroyed");
+        CHECK(liveFrames == 0);
+    }
+    {
+        // promise 的构造函数抛出：参数副本要析构；promise 没有构造成，不析构。
+        EventLog log;
+        CHECK(throwsWhileBuildingAFrame(log, true, false));
+        EXPECT_EVENTS(log, "first constructed", "first destroyed");
+        CHECK(liveFrames == 0);
+    }
+    {
+        // 局部的构造函数抛出：promise 已经构造好，先析构它，再析构参数副本。
+        EventLog log;
+        localsThrow = true;
+        CHECK(throwsWhileBuildingAFrame(log, false, false));
+        localsThrow = false;
+        EXPECT_EVENTS(log, "first constructed", "promise constructed",
+                      "promise destroyed", "first destroyed");
+        CHECK(liveFrames == 0);
+    }
+    {
+        // 对照：什么都不抛，协程照常运行到结束。
+        EventLog log;
+        CHECK(not throwsWhileBuildingAFrame(log, false, false));
+        EXPECT_EVENTS(log, "first constructed", "promise constructed", "body",
+                      "promise destroyed", "first destroyed");
+        CHECK(liveFrames == 0);
+    }
+}
+
 // initial awaiter 的 await_resume 抛出不属于"初始挂起点之前"：标准在求值 await-resume
 // 之前就把 initial-await-resume-called 置真（[dcl.fct.def.coroutine]/5），所以异常进入
 // unhandled_exception，协程走到 final suspend，帧仍由拥有者销毁。
@@ -1131,6 +1238,7 @@ int main() {
     localsAreDestroyedBeforeUnhandledException();
     rethrowingUnhandledExceptionLeavesTheCoroutineAtFinalSuspend();
     exceptionsBeforeTheInitialAwaitResumePropagateToTheCaller();
+    aFrameThatFailsHalfwayThroughConstructionIsRolledBack();
     initialAwaitResumeExceptionsReachUnhandledException();
     awaitSuspendReturningVoidSuspends();
     readyAwaiterNeverSuspends();
