@@ -105,6 +105,39 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 120
 
+  # 禁用异常的构建：全部测试以 -fno-exceptions -fno-rtti 编译（CO2_TEST_NO_EXCEPTIONS）。
+  # 库从编译器的开关得出 CO2_HAS_EXCEPTIONS，去掉 try / catch 与装异常的那一半；值、
+  # 错误码、已停止三种完成方式照常工作，错误到达根则是契约违规。Release 也跑：没有
+  # 异常边之后优化器看到的控制流不同。
+  no-exceptions:
+    name: ${{ matrix.compiler }} ${{ matrix.build_type }} -fno-exceptions
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
+            -DCO2_TEST_NO_EXCEPTIONS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
   msvc:
     name: MSVC ${{ matrix.toolset }} ${{ matrix.build_type }}
     runs-on: ${{ matrix.os }}

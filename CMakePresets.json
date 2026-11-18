@@ -49,6 +49,15 @@
             }
         },
         {
+            "name": "no-exceptions",
+            "displayName": "Debug, -fno-exceptions -fno-rtti",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CO2_TEST_NO_EXCEPTIONS": "ON"
+            }
+        },
+        {
             "name": "release-bench",
             "displayName": "Release benchmarks (-O2)",
             "inherits": "base",
@@ -76,6 +85,10 @@
         {
             "name": "tsan",
             "configurePreset": "tsan"
+        },
+        {
+            "name": "no-exceptions",
+            "configurePreset": "no-exceptions"
         },
         {
             "name": "release-bench",
@@ -111,6 +124,13 @@
         {
             "name": "tsan",
             "configurePreset": "tsan",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "no-exceptions",
+            "configurePreset": "no-exceptions",
             "output": {
                 "outputOnFailure": true
             }
