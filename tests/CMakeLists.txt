@@ -81,6 +81,10 @@ function(co2_configure_test_target target)
                 -Wnon-virtual-dtor
                 -Wold-style-cast
                 -Wzero-as-null-pointer-constant
+                # Clang 的 -Wextra 不含它（GCC 的含）。挂起点展开出的 case 标签落在使用者
+                # 的代码行上，使用者开着它时不能报警，见 config.hpp 的
+                # CO2_DETAIL_FALLTHROUGH。
+                -Wimplicit-fallthrough
                 -Werror=return-type
                 -Werror=uninitialized
                 -Werror=suggest-override

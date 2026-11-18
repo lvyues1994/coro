@@ -202,6 +202,9 @@
 // 恢复点（case 标签之后）比标准多一步：awaiter 有 await_completion() 时先问它这次等待
 // 是怎么结束的；出错或已停止就此结束协程，不调用 await_resume()，见
 // FrameCore::finishUnlessValue。
+//
+// 不挂起（await_ready 为真，或 await_suspend 返回 false）时控制流顺着走进 case 标签：
+// 这是有意的贯穿，标注出来，见 config.hpp 的 CO2_DETAIL_FALLTHROUGH。
 #define CO2_DETAIL_AWAIT_IMPL(awaiter_type, resume, awaitable_expression, unique)      \
     do {                                                                               \
         using _co2_awaiter_type = CO2_DETAIL_PP_REMOVE_PARENS_I awaiter_type;          \
@@ -217,6 +220,7 @@
             if (_co2_outcome.suspended) return _co2_outcome.next;                      \
             _co2_context.markRunning();                                                \
         }                                                                              \
+        CO2_DETAIL_FALLTHROUGH;                                                        \
     case CO2_DETAIL_SUSPEND_POINT(unique):                                             \
         {                                                                              \
             ::co2::detail::FrameHeader* _co2_next = nullptr;                           \

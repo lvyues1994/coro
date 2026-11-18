@@ -68,3 +68,20 @@
 #define CO2_DETAIL_MSVC_WARNING_PUSH_DISABLE(number)
 #define CO2_DETAIL_MSVC_WARNING_POP
 #endif
+
+// "这里是有意贯穿到下一个 case 标签"的标注。挂起点的 case 标签由宏展开在使用者的
+// 协程体里，前面的语句顺着执行就会走到它；没有标注的话，开着 -Wimplicit-fallthrough 的
+// 使用者（Clang 不在 -Wextra 里默认带它，但很多工程会开）在每一个挂起点上都收到一条
+// 告警，而且告警落在他们自己的代码行上，把 co2 当系统头包含也压不掉。
+//
+// [[fallthrough]] 是 C++17 的；更早的标准下用编译器各自的拼写——Clang 在 C++14 里对标准
+// 拼写报"C++17 扩展"，MSVC 则报"属性被忽略"。认不出的编译器上它是一条空语句。
+#if CO2_CPLUSPLUS >= 201703L
+#define CO2_DETAIL_FALLTHROUGH [[fallthrough]]
+#elif defined(__clang__)
+#define CO2_DETAIL_FALLTHROUGH [[clang::fallthrough]]
+#elif defined(__GNUC__) && __GNUC__ >= 7
+#define CO2_DETAIL_FALLTHROUGH __attribute__((fallthrough))
+#else
+#define CO2_DETAIL_FALLTHROUGH static_cast<void>(0)
+#endif
